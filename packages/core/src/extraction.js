@@ -1,23 +1,20 @@
-require("dotenv").config();
 const fs = require("fs")
 const FIGMA_API_URL = "https://api.figma.com/v1";
-const FIGMA_FKEY = process.env.FIGMA_FKEY
-const FIGMA_PAT = process.env.FIGMA_PAT
 
 // Retrieves the Node IDs based on the targeted Figma file.
-async function getTargetNodeIds() {
+async function getTargetNodeIds(targetPageName, fileKey, accessToken) { // Added parameter for flexibility
   const requestInit = {
     method: "GET",
     headers: {
-      'X-Figma-Token': FIGMA_PAT,
+      'X-Figma-Token': accessToken,
       'Content-Type': 'application/json'
     },
   };
 
   try {
-    // depth=2 drops inner layer data, leaving only structural Frames & Pages
-    const response = await fetch(`${FIGMA_API_URL}/files/${FIGMA_FKEY}?depth=2`, requestInit);
-    
+    // depth=2 is perfect here: it gives us the Page (depth 1) and the Frames (depth 2)
+    const response = await fetch(`${FIGMA_API_URL}/files/${fileKey}?depth=2`, requestInit);
+
     if (!response.ok) {
       throw new Error(`API Error: ${response.status} ${response.statusText}`);
     }
@@ -25,52 +22,60 @@ async function getTargetNodeIds() {
     const fileData = await response.json();
     const frameIdentifiers = [];
 
-    // Traverse down to find top-level frames on each design page
     if (fileData.document && fileData.document.children) {
-      fileData.document.children.forEach(page => {
-        if (page.type === "CANVAS" && page.children) { // CANVAS represents a Figma Page
-          page.children.forEach(child => {
-            if (child.type === "FRAME") {
-              frameIdentifiers.push({
-                id: child.id,
-                name: child.name,
-                pageName: page.name
-              });
-            }
-          });
-        }
-      });
+      // 1. Find the specific page first
+      const targetPage = fileData.document.children.find(
+        page => page.type === "CANVAS" && page.name === targetPageName
+      );
+
+      // 2. Only if the page exists, iterate through its top-level frames
+      if (targetPage && targetPage.children) {
+        targetPage.children.forEach(child => {
+          if (child.type === "FRAME") {
+            frameIdentifiers.push({
+              id: child.id,
+              name: child.name,
+              pageName: targetPage.name
+            });
+          }
+        });
+      } else {
+        console.warn(`Page named "${targetPageName}" not found in file.`);
+      }
     }
 
-    console.log("Found Top-Level Frames available for deep targeted queries:");
-    console.table(frameIdentifiers);
+    if (frameIdentifiers.length > 0) {
+      console.log(`Found ${frameIdentifiers.length} Top-Level Frames on page: "${targetPageName}"`);
+      console.table(frameIdentifiers);
 
-    // Join IDs to easily paste directly into your targeted fetch script
-    const idListForNextQuery = frameIdentifiers.map(f => f.id).join(",");
-    console.log(`\nTargeted ID string query parameter:\n?ids=${idListForNextQuery}`);
-    return idListForNextQuery
+      const idListForNextQuery = frameIdentifiers.map(f => f.id).join(",");
+      console.log(`\nTargeted ID string for page "${targetPageName}":\n?ids=${idListForNextQuery}`);
+      return idListForNextQuery;
+    }
+
+    return null;
   } catch (error) {
     console.error("Failed to map base nodes:", error);
   }
 }
 
 // Extract the Figma nodes based on the available identifiers in the file.
-async function extractFigmaNodes(nodeQuery) {
+async function extractFigmaNodes(nodeQuery, fileKey, accessToken) {
   const requestInit = {
     method: "GET",
     headers: {
-      'X-Figma-Token': FIGMA_PAT,
+      'X-Figma-Token': accessToken,
       'Content-Type': 'application/json'
     },
   };
 
   // Construct URL with explicit comma-separated node ID filters
-  const targetUrl = `${FIGMA_API_URL}/files/${FIGMA_FKEY}/nodes?ids=${nodeQuery}`;
+  const targetUrl = `${FIGMA_API_URL}/files/${fileKey}/nodes?ids=${nodeQuery}`;
 
   try {
     console.log(`Querying targeted nodes: ${nodeQuery}...`);
     let response = await fetch(targetUrl, requestInit);
-    
+
     if (!response.ok) {
       throw new Error(`Figma API returned ${response.status}: ${response.statusText}`);
     }
@@ -79,9 +84,7 @@ async function extractFigmaNodes(nodeQuery) {
     const finalStructuredData = parseTargetedNodes(apiData);
 
     // Save out the isolated design source of truth
-    fs.writeFileSync("DESIGN_REF.json", JSON.stringify(finalStructuredData, null, 2));
-    console.log("Extraction complete! Output saved to DESIGN_REF.json");
-
+    return finalStructuredData
   } catch (error) {
     console.error("Extraction workflow failed:", error);
   }
@@ -134,7 +137,7 @@ function parseTargetedNodes(apiData) {
           id: node.componentId,
           ...globalComponents[node.componentId]
         };
-        
+
         // Link component variant parent tracking (e.g. Size=48 group properties)
         const setId = globalComponents[node.componentId].componentSetId;
         if (setId && globalComponentSets[setId]) {
@@ -184,10 +187,10 @@ function extractLayoutProperties(node) {
     layoutGrow: node.layoutGrow || 0,
     minWidth: node.minWidth || null,
     maxWidth: node.maxWidth || null,
-    
+
     // Add Radius
     borderRadius: node.cornerRadius || 0,
-    
+
     padding: {
       top: node.paddingTop || 0,
       right: node.paddingRight || 0,
@@ -196,19 +199,64 @@ function extractLayoutProperties(node) {
     },
     alignItems: node.counterAxisAlignItems || "MIN",
     justifyContent: node.primaryAxisAlignItems || "MIN",
-    
+
     // Important: Use absoluteRenderBounds for true visual size 
     // (includes strokes/effects)
     visualDimensions: node.absoluteRenderBounds || node.absoluteBoundingBox,
-    
+
     // Variables check
     variables: node.boundVariables || {}
   };
 }
 
-async function runRoutine() {
-    const nodes = await getTargetNodeIds()
-    extractFigmaNodes(nodes)
+async function queryFigmaStyles(page, fileKey, accessToken) {
+  const nodes = await getTargetNodeIds(page, fileKey, accessToken)
+  return extractFigmaNodes(nodes, fileKey, accessToken)
 }
 
-runRoutine()
+/**
+ * Checks if the Figma file has been updated since the last check.
+ * @returns {Promise<boolean>} True if updated, false otherwise.
+ */
+async function hasFileBeenUpdated(fileKey, accessToken) {
+  const requestInit = {
+    method: "GET",
+    headers: {
+      'X-Figma-Token': accessToken,
+    },
+  };
+
+  try {
+    // We use depth=1 to get ONLY the root metadata and page names
+    const response = await fetch(`${FIGMA_API_URL}/files/${fileKey}?depth=1`, requestInit);
+    
+    if (!response.ok) {
+      throw new Error(`Status: ${response.status}`);
+    }
+
+    const { lastModified } = await response.json();
+
+    // If this is the first time running, just store the date and return false
+    if (!lastKnownChange) {
+      lastKnownChange = lastModified;
+      console.log(`Initial timestamp stored: ${lastModified}`);
+      return false;
+    }
+
+    // Compare timestamps
+    if (new Date(lastModified) > new Date(lastKnownChange)) {
+      console.log(`Update detected! Old: ${lastKnownChange} -> New: ${lastModified}`);
+      lastKnownChange = lastModified; // Update the reference
+      return true;
+    }
+
+    console.log("No changes detected.");
+    return false;
+
+  } catch (error) {
+    console.error("Metadata check failed:", error);
+    return false;
+  }
+}
+
+module.exports = {queryFigmaStyles, hasFileBeenUpdated}

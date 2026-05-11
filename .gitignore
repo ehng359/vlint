@@ -1,3 +1,5 @@
 .env
 node_modules/
 DESIGN_REF.json
+scratchpad.js
+dist/
