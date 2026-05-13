@@ -20,32 +20,45 @@ const PARSE_OPTIONS: ParserOptions = {
 
 const ANNOTATION_RE = /@design-component\s+(\S+)/;
 
-export function extractStyles(sourceCode: string): Record<string, StyleProp[]> {
+export function extractStyles(sourceCode: string): [string, Record<string, StyleProp[]>] {
   let ast;
 
   try {
     ast = parse(sourceCode, PARSE_OPTIONS);
   } catch (err: unknown) {
     console.warn("[vlint] Parse error:", (err as Error).message);
-    return {};
+    return ["", {}];
   }
 
-  const findings: Record<string, StyleProp[]> = {};
+  // Define a state object to collect data during traversal
+  const state = {
+    frame: "",
+    findings: {} as Record<string, StyleProp[]>
+  };
+
+  const frameMatch = sourceCode.match(/@design-frame\s+(\S+)/);
+
+  if (frameMatch) {
+    state.frame = frameMatch[1];
+  }
 
   traverse(ast, {
-    JSXOpeningElement(path: NodePath<JSXOpeningElement>) {
+    JSXOpeningElement(path, state) {
       const componentName = getDesignAnnotation(path);
       if (!componentName) return;
-      console.log(componentName)
+
       const styleProps = extractStyleProps(path);
 
-      for (const sp of styleProps) {
-        (findings[componentName] ??= []).push({ ...sp })
+      if (styleProps.length > 0) {
+        state.findings[componentName] = [
+          ...(state.findings[componentName] || []),
+          ...styleProps
+        ];
       }
     },
-  });
+  }, undefined, state); // Pass state as the 4th argument
 
-  return findings;
+  return [state.frame, state.findings];
 }
 
 function getDesignAnnotation(path: NodePath<JSXOpeningElement>): string | null {

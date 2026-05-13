@@ -89,6 +89,7 @@ async function extractFigmaNodes(nodeQuery, fileKey, accessToken) {
     console.error("Extraction workflow failed:", error);
   }
 }
+
 function parseTargetedNodes(apiData) {
   const output = {
     extractedAt: new Date().toISOString(),
@@ -209,9 +210,80 @@ function extractLayoutProperties(node) {
   };
 }
 
+/**
+ * Checks if the Figma file has been updated since the last check.
+ * @returns {
+ *  extractedAt: string, // ISO Timestamp
+ *  nodes: {
+ *    [frameName: string]: {
+ *      id: string,
+ *      type: string,
+ *      layoutMode: string,
+ *      itemSpacing: number,
+ *      padding: { top: number, right: number, bottom: number, left: number },
+ *      borderRadius: number,
+ *      visualDimensions: object, // absoluteRenderBounds or absoluteBoundingBox
+ *      childrenElements: Array<FigmaElement>
+ *    }
+ *  }
+ * }
+ */
 async function queryFigmaStyles(page, fileKey, accessToken) {
-  const nodes = await getTargetNodeIds(page, fileKey, accessToken)
-  return extractFigmaNodes(nodes, fileKey, accessToken)
+    const nodes = await getTargetNodeIds(page, fileKey, accessToken);
+    const figmaNodes = await extractFigmaNodes(nodes, fileKey, accessToken);
+
+    const registry = {};
+
+    // 1. Iterate through each top-level Frame (e.g., "ProductModule")
+    for (const key in figmaNodes.nodes) {
+        const frameNode = figmaNodes.nodes[key]
+        
+        // Translate the frame itself
+        const translatedFrame = mapFigmaToCss(frameNode);
+        
+        // Prepare the container for this frame's flattened children
+        const childrenMap = {};
+
+        // 2. Define a nested walker that only populates this frame's childrenMap
+        function walk(node) {
+            if (!node) return;
+
+            // Translate the child node
+            const translatedChild = mapFigmaToCss(node);
+
+            if (translatedChild.name) {
+                childrenMap[translatedChild.name] = translatedChild;
+            }
+
+            // Recursively dive into children
+            const kids = node.childrenElements || node.children;
+            if (kids && Array.isArray(kids)) {
+                kids.forEach(walk);
+                // Clean up the tree references to keep JSON small
+                delete translatedChild.childrenElements;
+                delete translatedChild.children;
+            }
+        }
+
+        // 3. Start the walk from the frame's children (don't walk the frame again)
+        const frameChildren = frameNode.childrenElements || frameNode.children;
+        if (frameChildren) {
+            frameChildren.forEach(walk);
+        }
+
+        // 4. Clean up the frame object and assign the flattened map
+        delete translatedFrame.childrenElements;
+        delete translatedFrame.children;
+        
+        registry[key] = {
+            ...translatedFrame,
+            children: childrenMap // This is now a flat object { "CardName": {...} }
+        };
+    };
+
+    console.log(registry)
+    figmaNodes.nodes = registry
+    return figmaNodes;
 }
 
 /**
@@ -257,6 +329,120 @@ async function hasFileBeenUpdated(fileKey, accessToken) {
     console.error("Metadata check failed:", error);
     return false;
   }
+}
+
+function flattenFigmaNodes(nodeList) {
+    const registry = {};
+
+    function walk(node) {
+        if (!node) return;
+
+        console.log(`${node.name}\n`)
+        // 1. Process the current node
+        // We skip generic names or empty names to avoid clutter
+        if (node.name && node.type !== "DOCUMENT" && node.type !== "CANVAS") {
+            if (registry[node.name]) {
+                console.warn(`Conflict: Duplicate layer name "${node.name}".`);
+            }
+            console.log("Running the Figma -> CSS map")
+            registry[node.name] = mapFigmaToCss(node);
+        }
+
+        // 2. Recursively walk through children if they exist
+        // Note: Raw Figma API uses 'children', but your core likely renamed to 'childrenElements'
+        const children = node.childrenElements || node.children;
+        console.log(`Going through the children of ${node.name}`)
+        if (children && Array.isArray(children)) {
+            children.forEach(walk);
+        }
+    }
+
+    // Start the walk for every top-level node (Frame)
+    for (const node of nodeList) {
+      walk(node)
+    }
+
+    return registry;
+}
+
+function mapFigmaToCss(node) {
+    const css = {};
+
+    // --- 1. BOX MODEL ---
+    if (node.visualDimensions) {
+        css.width = `${Math.round(node.visualDimensions.width)}px`;
+        css.height = `${Math.round(node.visualDimensions.height)}px`;
+    }
+
+    // --- 2. COLORS ---
+    const processColor = (paint) => {
+        if (paint?.type === 'SOLID' && paint.color) {
+            const { r, g, b } = paint.color;
+            const a = paint.opacity ?? paint.color.a ?? 1;
+            const toHex = (v) => Math.round(v * 255).toString(16).padStart(2, '0');
+            return a === 1 
+                ? `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase()
+                : `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a.toFixed(2)})`;
+        }
+        return null;
+    };
+
+    if (node.visuals?.fills?.length > 0) {
+        css.backgroundColor = processColor(node.visuals.fills[0]);
+    }
+
+    if (node.visuals?.strokes?.length > 0) {
+        const color = processColor(node.visuals.strokes[0]);
+        if (color) css.border = `${node.visuals.strokeWeight || 1}px solid ${color}`;
+    }
+
+    // --- 3. TYPOGRAPHY ---
+    if (node.type === "TEXT" && node.textDetails?.style) {
+        const s = node.textDetails.style;
+        css.fontFamily = s.fontFamily;
+        css.fontSize = `${s.fontSize}px`;
+        css.fontWeight = s.fontWeight;
+        css.textAlign = s.textAlignHorizontal?.toLowerCase() || 'left';
+        if (s.lineHeightPx) css.lineHeight = `${Math.round(s.lineHeightPx)}px`;
+    }
+
+    // --- 4. AUTO-LAYOUT ---
+    if (node.layoutMode && node.layoutMode !== "NONE") {
+        css.display = 'flex';
+        css.flexDirection = node.layoutMode === 'VERTICAL' ? 'column' : 'row';
+        css.gap = `${node.itemSpacing || 0}px`;
+
+        const alignMap = { "MIN": "flex-start", "CENTER": "center", "MAX": "flex-end", "SPACE_BETWEEN": "space-between" };
+        css.alignItems = alignMap[node.alignItems] || 'stretch';
+        css.justifyContent = alignMap[node.justifyContent] || 'flex-start';
+    }
+
+    // --- 5. PADDING ---
+    if (node.padding) {
+        const { top, right, bottom, left } = node.padding;
+        css.padding = top === bottom && left === right 
+            ? `${top}px ${right}px` 
+            : `${top}px ${right}px ${bottom}px ${left}px`;
+    }
+
+    // --- 6. CLEANUP & MERGE ---
+    // Destructure properties we want to REMOVE from the final object
+    const {
+        layoutMode,
+        itemSpacing,
+        alignItems,
+        justifyContent,
+        padding,          // Removing original object to favor CSS string
+        visuals,          // Removing raw fills/strokes array
+        textDetails,      // Removing raw typography object
+        visualDimensions, // Removing raw box data
+        ...remainingMetadata
+    } = node;
+
+    return {
+        ...remainingMetadata,
+        ...css
+    };
 }
 
 module.exports = {queryFigmaStyles, hasFileBeenUpdated}
