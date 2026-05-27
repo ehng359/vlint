@@ -1,6 +1,6 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
-import { extractStyles, FigmaElement, FigmaPage, hasFileBeenUpdated, queryFigmaStyles } from '@vlint/core';
+import { applyStyleFixes, extractStyles, FigmaElement, FigmaPage, hasFileBeenUpdated, queryFigmaStyles, StyleFix } from '@vlint/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -82,7 +82,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 		Object.entries(styleMapping).forEach(([componentName, codeStyles]) => {
 			// 1. Find the corresponding element in the Figma reference
-			const figmaElement = frameContent.childrenElements.find(elem => elem.name === componentName);
+			const figmaElement = frameContent.children[componentName]
 
 			if (!figmaElement) {
 				mismatches.push(`Component "${componentName}" exists in code but not in Figma frame.`);
@@ -116,8 +116,102 @@ export function activate(context: vscode.ExtensionContext) {
 				outputChannel.appendLine(`${componentName} matches Figma spec.`);
 			}
 		});
-		// TODO: Make programmatic updates to mismatched styles.
+		const pendingFixes: StyleFix[] = [];  // <-- structured fixes to apply
 
+		Object.entries(styleMapping).forEach(([componentName, codeStyles]) => {
+			const figmaElement = frameContent.children[componentName]
+			if (!figmaElement) {
+				mismatches.push(`Component "${componentName}" exists in code but not in Figma frame.`);
+				return;
+			}
+
+			let componentMatch = true;
+
+			for (const style of codeStyles) {
+				const figmaValue = figmaElement[style.propName as keyof FigmaElement];
+
+				if (figmaValue === undefined) {
+					outputChannel.appendLine(`[Warn] Property "${style.propName}" not found in Figma for "${componentName}"`);
+					continue;
+				}
+
+				if (String(style.actualValue).toLowerCase() !== String(figmaValue).toLowerCase()) {
+					mismatches.push(
+						`Style Mismatch in "${componentName}": ${style.propName} — Code: ${style.actualValue}, Figma: ${figmaValue}`
+					);
+					componentMatch = false;
+
+					// Queue a fix using the Figma value as the source of truth
+					pendingFixes.push({
+						componentName,
+						propName: style.propName,
+						figmaValue: figmaValue as string | number,
+					});
+				}
+			}
+
+			// Keys that are Figma/extraction metadata, not CSS properties
+			const FIGMA_METADATA_KEYS = new Set([
+				'id', 'name', 'type', 'resolvedDesignTokens', 'variables',
+				'layoutAlign', 'layoutGrow', 'minWidth', 'maxWidth',
+				'children', 'childrenElements'
+			]);
+
+			// Props already present in the code
+			const codePropNames = new Set(codeStyles.map(s => s.propName));
+
+			for (const [prop, figmaValue] of Object.entries(figmaElement)) {
+				if (FIGMA_METADATA_KEYS.has(prop)) continue;         // skip metadata
+				if (codePropNames.has(prop)) continue;               // already compared above
+				if (figmaValue === null || figmaValue === undefined) continue;
+				if (typeof figmaValue === 'object') continue;        // skip nested objects
+
+				mismatches.push(`Missing in code — "${componentName}.${prop}": Figma has ${figmaValue}`);
+
+				pendingFixes.push({
+					componentName,
+					propName: prop,
+					figmaValue: figmaValue as string | number,
+				});
+			}
+
+			if (componentMatch) {
+				outputChannel.appendLine(`✓ ${componentName} matches Figma spec.`);
+			}
+		});
+
+		// Apply all queued fixes in a single pass if any mismatches were found
+		if (pendingFixes.length > 0) {
+			outputChannel.appendLine(`\n[vlint] Applying ${pendingFixes.length} fix(es)...`);
+
+			const originalSource = document.getText();
+			const fixedSource = applyStyleFixes(originalSource, pendingFixes);
+
+			if (fixedSource !== originalSource) {
+				const edit = new vscode.WorkspaceEdit();
+				const fullRange = new vscode.Range(
+					document.positionAt(0),
+					document.positionAt(originalSource.length)
+				);
+
+				edit.replace(document.uri, fullRange, fixedSource);
+
+				const success = await vscode.workspace.applyEdit(edit);
+
+				if (success) {
+					outputChannel.appendLine(`[vlint] ✓ Source updated. Saving...`);
+					await document.save(); // persist to disk
+				} else {
+					outputChannel.appendLine(`[vlint] ✗ WorkspaceEdit failed — no changes written.`);
+				}
+			}
+		}
+
+		// Surface mismatches regardless of whether fixes were applied
+		if (mismatches.length > 0) {
+			outputChannel.appendLine("\n[vlint] Mismatches detected:");
+			mismatches.forEach(m => outputChannel.appendLine(m));
+		}
 	})
 
 }

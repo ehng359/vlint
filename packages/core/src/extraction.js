@@ -1,5 +1,6 @@
 const fs = require("fs")
 const FIGMA_API_URL = "https://api.figma.com/v1";
+let lastKnownChange = null; // ← add this
 
 // Retrieves the Node IDs based on the targeted Figma file.
 async function getTargetNodeIds(targetPageName, fileKey, accessToken) { // Added parameter for flexibility
@@ -211,22 +212,13 @@ function extractLayoutProperties(node) {
 }
 
 /**
- * Checks if the Figma file has been updated since the last check.
- * @returns {
- *  extractedAt: string, // ISO Timestamp
+ * Queries and maps Figma nodes for a given page into CSS-translated style data.
+ * @returns {{
+ *  extractedAt: string,
  *  nodes: {
- *    [frameName: string]: {
- *      id: string,
- *      type: string,
- *      layoutMode: string,
- *      itemSpacing: number,
- *      padding: { top: number, right: number, bottom: number, left: number },
- *      borderRadius: number,
- *      visualDimensions: object, // absoluteRenderBounds or absoluteBoundingBox
- *      childrenElements: Array<FigmaElement>
- *    }
+ *    [frameName: string]: FigmaFrame
  *  }
- * }
+ * }}
  */
 async function queryFigmaStyles(page, fileKey, accessToken) {
     const nodes = await getTargetNodeIds(page, fileKey, accessToken);
@@ -329,40 +321,6 @@ async function hasFileBeenUpdated(fileKey, accessToken) {
     console.error("Metadata check failed:", error);
     return false;
   }
-}
-
-function flattenFigmaNodes(nodeList) {
-    const registry = {};
-
-    function walk(node) {
-        if (!node) return;
-
-        console.log(`${node.name}\n`)
-        // 1. Process the current node
-        // We skip generic names or empty names to avoid clutter
-        if (node.name && node.type !== "DOCUMENT" && node.type !== "CANVAS") {
-            if (registry[node.name]) {
-                console.warn(`Conflict: Duplicate layer name "${node.name}".`);
-            }
-            console.log("Running the Figma -> CSS map")
-            registry[node.name] = mapFigmaToCss(node);
-        }
-
-        // 2. Recursively walk through children if they exist
-        // Note: Raw Figma API uses 'children', but your core likely renamed to 'childrenElements'
-        const children = node.childrenElements || node.children;
-        console.log(`Going through the children of ${node.name}`)
-        if (children && Array.isArray(children)) {
-            children.forEach(walk);
-        }
-    }
-
-    // Start the walk for every top-level node (Frame)
-    for (const node of nodeList) {
-      walk(node)
-    }
-
-    return registry;
 }
 
 function mapFigmaToCss(node) {

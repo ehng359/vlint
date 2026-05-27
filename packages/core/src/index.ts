@@ -1,5 +1,5 @@
 import { hasFileBeenUpdated, queryFigmaStyles } from './extraction';
-import extractStyles from "./parser";
+import { applyStyleFixes, extractStyles, StyleFix } from "./parser";
 interface FigmaColor {
     r: number;
     g: number;
@@ -73,15 +73,15 @@ interface FigmaFrame {
         width: number;
         height: number;
     };
-    childrenElements: FigmaElement[];
+    children: { [componentName: string]: FigmaElement };
 }
 
 interface FigmaPage {
     extractedAt: string;
-    fileKey: string;
     nodes: {
         [frameName: string]: FigmaFrame;
     };
 }
-export { extractStyles, FigmaColor, FigmaElement, FigmaFrame, FigmaPage, FigmaPaint, hasFileBeenUpdated, queryFigmaStyles };
+
+export { applyStyleFixes, extractStyles, FigmaColor, FigmaElement, FigmaFrame, FigmaPage, FigmaPaint, hasFileBeenUpdated, queryFigmaStyles, StyleFix };
 

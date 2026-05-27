@@ -1,7 +1,12 @@
+import generate from "@babel/generator";
 import { parse, ParserOptions } from "@babel/parser";
 import traverse, { NodePath } from "@babel/traverse";
+import * as t from "@babel/types";
+
 import {
-  isNumericLiteral, isStringLiteral, JSXExpressionContainer,
+  isNumericLiteral, isStringLiteral,
+  JSXAttribute,
+  JSXExpressionContainer,
   JSXOpeningElement,
   ObjectExpression,
   SourceLocation
@@ -49,14 +54,14 @@ export function extractStyles(sourceCode: string): [string, Record<string, Style
 
       const styleProps = extractStyleProps(path);
 
-      if (styleProps.length > 0) {
-        state.findings[componentName] = [
-          ...(state.findings[componentName] || []),
-          ...styleProps
-        ];
-      }
+      // Always register the component so extension.ts can still
+      // run the Figma comparison even when style is absent or empty
+      state.findings[componentName] = [
+        ...(state.findings[componentName] || []),
+        ...styleProps
+      ];
     },
-  }, undefined, state); // Pass state as the 4th argument
+  }, undefined, state);
 
   return [state.frame, state.findings];
 }
@@ -97,7 +102,7 @@ function getDesignAnnotation(path: NodePath<JSXOpeningElement>): string | null {
   return null;
 }
 
-function extractStyleProps(path: NodePath<JSXOpeningElement>): StyleProp[] {
+export function extractStyleProps(path: NodePath<JSXOpeningElement>): StyleProp[] {
   const results: StyleProp[] = [];
 
   for (const attr of path.node.attributes) {
@@ -124,4 +129,106 @@ function extractStyleProps(path: NodePath<JSXOpeningElement>): StyleProp[] {
   return results;
 }
 
-export default extractStyles;
+export interface StyleFix {
+  componentName: string;
+  propName: string;
+  figmaValue: string | number;
+}
+
+/**
+ * Takes source code and a list of fixes, returns corrected source.
+ * Preserves formatting as much as possible via retainLines.
+ */
+export function applyStyleFixes(sourceCode: string, fixes: StyleFix[]): string {
+  let ast;
+  try {
+    ast = parse(sourceCode, PARSE_OPTIONS);
+  } catch (err) {
+    console.warn("[vlint] Parse error during fix:", (err as Error).message);
+    return sourceCode;
+  }
+
+  // Build a nested lookup: componentName -> propName -> figmaValue
+  const fixMap = new Map<string, Map<string, string | number>>();
+  for (const fix of fixes) {
+    if (!fixMap.has(fix.componentName)) {
+      fixMap.set(fix.componentName, new Map());
+    }
+    fixMap.get(fix.componentName)!.set(fix.propName, fix.figmaValue);
+  }
+
+  traverse(ast, {
+    JSXOpeningElement(path) {
+      const componentName = getDesignAnnotation(path);
+      if (!componentName) return;
+
+      const propFixes = fixMap.get(componentName);
+      if (!propFixes) return;
+
+      const styleAttr = path.node.attributes.find(
+        attr =>
+          attr.type === "JSXAttribute" &&
+          attr.name?.type === "JSXIdentifier" &&
+          attr.name.name === "style"
+      ) as JSXAttribute | undefined;
+
+      if (styleAttr) {
+        const container = styleAttr.value as JSXExpressionContainer;
+        const obj = container.expression as ObjectExpression;
+        if (obj.type !== "ObjectExpression") return;
+
+        const applied = new Set<string>();
+
+        // Update existing properties
+        for (const prop of obj.properties) {
+          if (prop.type !== "ObjectProperty" || prop.computed) continue;
+          const key = prop.key.type === "Identifier" ? prop.key.name : "";
+          if (!propFixes.has(key)) continue;
+
+          const correctValue = propFixes.get(key)!;
+          prop.value = typeof correctValue === "number"
+            ? t.numericLiteral(correctValue)
+            : t.stringLiteral(String(correctValue));
+          applied.add(key);
+        }
+
+        // Insert properties absent from the style object (handles style={{}})
+        propFixes.forEach((correctValue, propName) => {
+          if (applied.has(propName)) return;
+          obj.properties.push(
+            t.objectProperty(
+              t.identifier(propName),
+              typeof correctValue === "number"
+                ? t.numericLiteral(correctValue)
+                : t.stringLiteral(String(correctValue))
+            )
+          );
+        });
+      } else {
+        // No style prop at all — build one from scratch and attach it
+        const properties: t.ObjectProperty[] = [];
+
+        propFixes.forEach((correctValue, propName) => {
+          properties.push(
+            t.objectProperty(
+              t.identifier(propName),
+              typeof correctValue === "number"
+                ? t.numericLiteral(correctValue)
+                : t.stringLiteral(String(correctValue))
+            )
+          );
+        });
+
+        path.node.attributes.push(
+          t.jsxAttribute(
+            t.jsxIdentifier("style"),
+            t.jsxExpressionContainer(t.objectExpression(properties))
+          )
+        );
+      }
+    },
+  });
+
+  // retainLines minimises diff noise; original source passed for comment preservation
+  return generate(ast, { concise: false }, sourceCode).code;
+}
