@@ -16,6 +16,49 @@ function parseManifest(filePath: string): Record<string, string> {
 	);
 }
 
+function normaliseValue(value: string | number): string {
+	const str = String(value).trim();
+
+	// Strip px and compare as numbers: "16px" === 16
+	if (/^-?\d+(\.\d+)?px$/.test(str)) {
+		return parseFloat(str).toString();
+	}
+
+	// Normalise font weight keywords to numbers
+	const fontWeightMap: Record<string, string> = {
+		thin: "100", extralight: "200", light: "300", regular: "400",
+		normal: "400", medium: "500", semibold: "600", bold: "700",
+		extrabold: "800", black: "900"
+	};
+	if (fontWeightMap[str.toLowerCase()]) {
+		return fontWeightMap[str.toLowerCase()];
+	}
+
+	// Normalise hex colors to lowercase #rrggbb (handles #FFF -> #ffffff)
+	const hex6 = str.match(/^#([0-9a-f]{6})$/i);
+	if (hex6) return "#" + hex6[1].toLowerCase();
+
+	const hex3 = str.match(/^#([0-9a-f]{3})$/i);
+	if (hex3) {
+		const [r, g, b] = hex3[1].split("");
+		return "#" + r + r + g + g + b + b;
+	}
+
+	// Normalise rgba(255, 255, 255, 1) -> #ffffff
+	const rgba = str.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
+	if (rgba) {
+		const a = rgba[4] !== undefined ? parseFloat(rgba[4]) : 1;
+		if (a === 1) {
+			return "#" + [rgba[1], rgba[2], rgba[3]]
+				.map(n => parseInt(n).toString(16).padStart(2, "0"))
+				.join("");
+		}
+		return `rgba(${rgba[1]}, ${rgba[2]}, ${rgba[3]}, ${a})`;
+	}
+
+	return str.toLowerCase();
+}
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
@@ -100,7 +143,8 @@ export function activate(context: vscode.ExtensionContext) {
 					continue;
 				}
 
-				if (String(style.actualValue).toLowerCase() !== String(figmaValue).toLowerCase()) {
+				// AFTER
+				if (normaliseValue(style.actualValue as string | number) !== normaliseValue(figmaValue as string | number)) {
 					mismatches.push(`
 						Style Mismatch in "${componentName}": 
 							Property: ${style.propName}
@@ -119,7 +163,7 @@ export function activate(context: vscode.ExtensionContext) {
 		const pendingFixes: StyleFix[] = [];  // <-- structured fixes to apply
 
 		Object.entries(styleMapping).forEach(([componentName, codeStyles]) => {
-			const figmaElement = frameContent.children[componentName]
+			const figmaElement = frameContent.children[componentName];
 			if (!figmaElement) {
 				mismatches.push(`Component "${componentName}" exists in code but not in Figma frame.`);
 				return;
@@ -128,6 +172,19 @@ export function activate(context: vscode.ExtensionContext) {
 			let componentMatch = true;
 
 			for (const style of codeStyles) {
+				// Actively catch backgroundColor written onto TEXT nodes by a previous
+				// bad extraction — swap it to color using the figma fill value
+				if (figmaElement.type === 'TEXT' && style.propName === 'backgroundColor') {
+					const correctColor = figmaElement.color as string | undefined;
+					if (correctColor) {
+						mismatches.push(`TEXT node "${componentName}" has backgroundColor in code — replacing with color: ${correctColor}`);
+						pendingFixes.push({ componentName, propName: 'backgroundColor', figmaValue: '' });   // remove it
+						pendingFixes.push({ componentName, propName: 'color', figmaValue: correctColor });   // add correct one
+					}
+					componentMatch = false;
+					continue;
+				}
+
 				const figmaValue = figmaElement[style.propName as keyof FigmaElement];
 
 				if (figmaValue === undefined) {
@@ -135,18 +192,20 @@ export function activate(context: vscode.ExtensionContext) {
 					continue;
 				}
 
-				if (String(style.actualValue).toLowerCase() !== String(figmaValue).toLowerCase()) {
+				if (normaliseValue(style.actualValue as string | number) !== normaliseValue(figmaValue as string | number)) {
 					mismatches.push(
 						`Style Mismatch in "${componentName}": ${style.propName} — Code: ${style.actualValue}, Figma: ${figmaValue}`
 					);
 					componentMatch = false;
 
-					// Queue a fix using the Figma value as the source of truth
-					pendingFixes.push({
-						componentName,
-						propName: style.propName,
-						figmaValue: figmaValue as string | number,
-					});
+					const isTextBackgroundLeak = figmaElement.type === 'TEXT' && style.propName === 'backgroundColor';
+					if (!isTextBackgroundLeak) {
+						pendingFixes.push({
+							componentName,
+							propName: style.propName,
+							figmaValue: figmaValue as string | number,
+						});
+					}
 				}
 			}
 
@@ -154,25 +213,28 @@ export function activate(context: vscode.ExtensionContext) {
 			const FIGMA_METADATA_KEYS = new Set([
 				'id', 'name', 'type', 'resolvedDesignTokens', 'variables',
 				'layoutAlign', 'layoutGrow', 'minWidth', 'maxWidth',
-				'children', 'childrenElements'
+				'children', 'childrenElements', 'boxSizing',
+				'primaryAxisSizingMode', 'counterAxisSizingMode'
 			]);
 
-			// Props already present in the code
 			const codePropNames = new Set(codeStyles.map(s => s.propName));
 
 			for (const [prop, figmaValue] of Object.entries(figmaElement)) {
-				if (FIGMA_METADATA_KEYS.has(prop)) continue;         // skip metadata
-				if (codePropNames.has(prop)) continue;               // already compared above
+				if (FIGMA_METADATA_KEYS.has(prop)) continue;
+				if (codePropNames.has(prop)) continue;
 				if (figmaValue === null || figmaValue === undefined) continue;
-				if (typeof figmaValue === 'object') continue;        // skip nested objects
+				if (typeof figmaValue === 'object') continue;
 
-				mismatches.push(`Missing in code — "${componentName}.${prop}": Figma has ${figmaValue}`);
-
-				pendingFixes.push({
-					componentName,
-					propName: prop,
-					figmaValue: figmaValue as string | number,
-				});
+				// Fixed: was comparing figmaValue to itself (always false)
+				const isTextBackgroundLeak = figmaElement.type === 'TEXT' && prop === 'backgroundColor';
+				if (!isTextBackgroundLeak) {
+					mismatches.push(`Missing in code — "${componentName}.${prop}": Figma has ${figmaValue}`);
+					pendingFixes.push({
+						componentName,
+						propName: prop,
+						figmaValue: figmaValue as string | number,
+					});
+				}
 			}
 
 			if (componentMatch) {

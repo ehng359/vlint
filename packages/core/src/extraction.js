@@ -122,9 +122,12 @@ function parseTargetedNodes(apiData) {
         type: node.type,
         ...extractLayoutProperties(node),
         visuals: {
-          fills: node.fills || [],
-          strokes: node.strokes || [],
-          effects: node.effects || []
+            fills: node.fills || [],
+            strokes: node.strokes || [],
+            strokeWeight: node.strokeWeight || 1,
+            strokeAlign: node.strokeAlign || "CENTER",
+            individualStrokeWeights: node.individualStrokeWeights || null,
+            effects: node.effects || []
         },
         textDetails: node.type === "TEXT" ? {
           text: node.characters || "",
@@ -181,34 +184,27 @@ function parseTargetedNodes(apiData) {
 }
 
 function extractLayoutProperties(node) {
-  return {
-    layoutMode: node.layoutMode || "NONE",
-    itemSpacing: node.itemSpacing || 0,
-    // Add Resizing Logic
-    layoutAlign: node.layoutAlign || "INHERIT",
-    layoutGrow: node.layoutGrow || 0,
-    minWidth: node.minWidth || null,
-    maxWidth: node.maxWidth || null,
-
-    // Add Radius
-    borderRadius: node.cornerRadius || 0,
-
-    padding: {
-      top: node.paddingTop || 0,
-      right: node.paddingRight || 0,
-      bottom: node.paddingBottom || 0,
-      left: node.paddingLeft || 0
-    },
-    alignItems: node.counterAxisAlignItems || "MIN",
-    justifyContent: node.primaryAxisAlignItems || "MIN",
-
-    // Important: Use absoluteRenderBounds for true visual size 
-    // (includes strokes/effects)
-    visualDimensions: node.absoluteRenderBounds || node.absoluteBoundingBox,
-
-    // Variables check
-    variables: node.boundVariables || {}
-  };
+    return {
+        layoutMode: node.layoutMode || "NONE",
+        primaryAxisSizingMode: node.primaryAxisSizingMode || "FIXED",   // ← add
+        counterAxisSizingMode: node.counterAxisSizingMode || "FIXED",   // ← add
+        itemSpacing: node.itemSpacing || 0,
+        layoutAlign: node.layoutAlign || "INHERIT",
+        layoutGrow: node.layoutGrow || 0,
+        minWidth: node.minWidth || null,
+        maxWidth: node.maxWidth || null,
+        borderRadius: node.cornerRadius || 0,
+        padding: {
+            top: node.paddingTop || 0,
+            right: node.paddingRight || 0,
+            bottom: node.paddingBottom || 0,
+            left: node.paddingLeft || 0
+        },
+        alignItems: node.counterAxisAlignItems || "MIN",
+        justifyContent: node.primaryAxisAlignItems || "MIN",
+        visualDimensions: node.absoluteBoundingBox,
+        variables: node.boundVariables || {}
+    };
 }
 
 /**
@@ -240,20 +236,22 @@ async function queryFigmaStyles(page, fileKey, accessToken) {
         function walk(node) {
             if (!node) return;
 
-            // Translate the child node
-            const translatedChild = mapFigmaToCss(node);
+            // Grab children from the RAW node before translation strips them
+            var kids = node.childrenElements || node.children;
+
+            var translatedChild = mapFigmaToCss(node);
+
+            // Scrub any residual tree references from the translated output
+            delete translatedChild.childrenElements;
+            delete translatedChild.children;
 
             if (translatedChild.name) {
                 childrenMap[translatedChild.name] = translatedChild;
             }
 
-            // Recursively dive into children
-            const kids = node.childrenElements || node.children;
+            // Recurse using the raw kids captured before translation
             if (kids && Array.isArray(kids)) {
                 kids.forEach(walk);
-                // Clean up the tree references to keep JSON small
-                delete translatedChild.childrenElements;
-                delete translatedChild.children;
             }
         }
 
@@ -283,44 +281,65 @@ async function queryFigmaStyles(page, fileKey, accessToken) {
  * @returns {Promise<boolean>} True if updated, false otherwise.
  */
 async function hasFileBeenUpdated(fileKey, accessToken) {
-  const requestInit = {
-    method: "GET",
-    headers: {
-      'X-Figma-Token': accessToken,
-    },
-  };
+  const MAX_RETRIES = 4;
+  const BASE_DELAY_MS = 1000;
 
-  try {
-    // We use depth=1 to get ONLY the root metadata and page names
-    const response = await fetch(`${FIGMA_API_URL}/files/${fileKey}?depth=1`, requestInit);
-    
-    if (!response.ok) {
-      throw new Error(`Status: ${response.status}`);
-    }
+  async function fetchWithBackoff(attempt) {
+    const requestInit = {
+      method: "GET",
+      headers: { 'X-Figma-Token': accessToken },
+    };
 
-    const { lastModified } = await response.json();
+    try {
+      const response = await fetch(`${FIGMA_API_URL}/files/${fileKey}?depth=1`, requestInit);
 
-    // If this is the first time running, just store the date and return false
-    if (!lastKnownChange) {
-      lastKnownChange = lastModified;
-      console.log(`Initial timestamp stored: ${lastModified}`);
+      // Retry on 429 with exponential backoff
+      if (response.status === 429) {
+        if (attempt >= MAX_RETRIES) {
+          console.warn(`[vlint] Rate limit hit after ${MAX_RETRIES} retries. Skipping update check.`);
+          return false;
+        }
+
+        // Respect Retry-After header if Figma sends one, otherwise back off exponentially
+        const retryAfter = response.headers.get('Retry-After');
+        const delayMs = retryAfter
+          ? parseInt(retryAfter) * 1000
+          : BASE_DELAY_MS * Math.pow(2, attempt);
+
+        console.warn(`[vlint] Rate limited (429). Retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
+        return fetchWithBackoff(attempt + 1);
+      }
+
+      if (!response.ok) {
+        throw new Error(`Status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const lastModified = data.lastModified;
+
+      if (!lastKnownChange) {
+        lastKnownChange = lastModified;
+        console.log(`[vlint] Initial timestamp stored: ${lastModified}`);
+        return false;
+      }
+
+      if (new Date(lastModified) > new Date(lastKnownChange)) {
+        console.log(`[vlint] Update detected! Old: ${lastKnownChange} -> New: ${lastModified}`);
+        lastKnownChange = lastModified;
+        return true;
+      }
+
+      console.log("[vlint] No changes detected.");
+      return false;
+
+    } catch (error) {
+      console.error("Metadata check failed:", error);
       return false;
     }
-
-    // Compare timestamps
-    if (new Date(lastModified) > new Date(lastKnownChange)) {
-      console.log(`Update detected! Old: ${lastKnownChange} -> New: ${lastModified}`);
-      lastKnownChange = lastModified; // Update the reference
-      return true;
-    }
-
-    console.log("No changes detected.");
-    return false;
-
-  } catch (error) {
-    console.error("Metadata check failed:", error);
-    return false;
   }
+
+  return fetchWithBackoff(0);
 }
 
 function mapFigmaToCss(node) {
@@ -328,8 +347,44 @@ function mapFigmaToCss(node) {
 
     // --- 1. BOX MODEL ---
     if (node.visualDimensions) {
-        css.width = `${Math.round(node.visualDimensions.width)}px`;
-        css.height = `${Math.round(node.visualDimensions.height)}px`;
+        var totalWidth  = Math.round(node.visualDimensions.width);
+        var totalHeight = Math.round(node.visualDimensions.height);
+
+        // Figma dimensions are border-box (padding included).
+        // CSS defaults to content-box, so subtract padding to get the true content size.
+        var padLeft   = node.padding ? node.padding.left   : 0;
+        var padRight  = node.padding ? node.padding.right  : 0;
+        var padTop    = node.padding ? node.padding.top    : 0;
+        var padBottom = node.padding ? node.padding.bottom : 0;
+
+        var contentWidth  = totalWidth  - padLeft - padRight;
+        var contentHeight = totalHeight - padTop  - padBottom;
+
+        if (node.layoutGrow === 1) {
+            css.flex = "1";
+        } else {
+            css.width = contentWidth + "px";
+        }
+
+        if (node.layoutAlign === "STRETCH") {
+            css.alignSelf = "stretch";
+        } else {
+            css.height = contentHeight + "px";
+        }
+    }
+
+    // Hug-content frames shouldn't have a fixed dimension on their hug axis
+    if (node.primaryAxisSizingMode === "AUTO") {
+        if (node.layoutMode === "VERTICAL")   delete css.height;
+        if (node.layoutMode === "HORIZONTAL") delete css.width;
+    }
+    if (node.counterAxisSizingMode === "AUTO") {
+        if (node.layoutMode === "VERTICAL")   delete css.width;
+        if (node.layoutMode === "HORIZONTAL") delete css.height;
+    }
+
+    if (node.borderRadius !== undefined && node.borderRadius !== 0) {
+        css.borderRadius = `${node.borderRadius}px`;
     }
 
     // --- 2. COLORS ---
@@ -346,12 +401,34 @@ function mapFigmaToCss(node) {
     };
 
     if (node.visuals?.fills?.length > 0) {
-        css.backgroundColor = processColor(node.visuals.fills[0]);
+        const color = processColor(node.visuals.fills[0]);
+        if (node.type === "TEXT") {
+            css.color = color;  // text fill = text color
+        } else {
+            css.backgroundColor = color;
+        }
     }
 
     if (node.visuals?.strokes?.length > 0) {
         const color = processColor(node.visuals.strokes[0]);
-        if (color) css.border = `${node.visuals.strokeWeight || 1}px solid ${color}`;
+        if (color) {
+            const individual = node.visuals.individualStrokeWeights;
+            if (individual) {
+                const sides = { borderTop: individual.top, borderRight: individual.right, borderBottom: individual.bottom, borderLeft: individual.left };
+                Object.entries(sides).forEach(function([prop, weight]) {
+                    if (weight > 0) css[prop] = weight + "px solid " + color;
+                });
+            } else {
+                const w = node.visuals.strokeWeight || 1;
+                const align = node.visuals.strokeAlign;
+                // INSIDE stroke in Figma renders like a box-shadow inset in CSS
+                if (align === "INSIDE") {
+                    css.boxShadow = "inset 0 0 0 " + w + "px " + color;
+                } else {
+                    css.border = w + "px solid " + color;
+                }
+            }
+        }
     }
 
     // --- 3. TYPOGRAPHY ---
@@ -378,23 +455,25 @@ function mapFigmaToCss(node) {
     // --- 5. PADDING ---
     if (node.padding) {
         const { top, right, bottom, left } = node.padding;
-        css.padding = top === bottom && left === right 
-            ? `${top}px ${right}px` 
+        css.padding = top === bottom && left === right
+            ? `${top}px ${right}px`
             : `${top}px ${right}px ${bottom}px ${left}px`;
     }
 
     // --- 6. CLEANUP & MERGE ---
     // Destructure properties we want to REMOVE from the final object
     const {
-        layoutMode,
-        itemSpacing,
-        alignItems,
-        justifyContent,
-        padding,          // Removing original object to favor CSS string
-        visuals,          // Removing raw fills/strokes array
-        textDetails,      // Removing raw typography object
-        visualDimensions, // Removing raw box data
-        ...remainingMetadata
+      layoutMode,
+      primaryAxisSizingMode,
+      counterAxisSizingMode,
+      itemSpacing,
+      alignItems,
+      justifyContent,
+      padding,
+      visuals,
+      textDetails,
+      visualDimensions,
+      ...remainingMetadata
     } = node;
 
     return {

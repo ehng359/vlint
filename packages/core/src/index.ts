@@ -37,6 +37,11 @@ interface FigmaElement {
     height: number;
     layoutAlign: 'STRETCH' | 'INHERIT';
     layoutGrow: 0 | 1;
+    boxSizing?: 'border-box' | 'content-box';
+
+    // CSS output properties
+    color?: string;           // ← add this
+    backgroundColor?: string; // ← and this, it was implicit before
 
     // Styling
     visuals: {
@@ -44,16 +49,14 @@ interface FigmaElement {
         strokes: FigmaPaint[];
         strokeWeight: number;
         cornerRadius?: number;
-        effects: any[]; // Shadows, blurs
+        effects: any[];
     };
 
-    // Text specific
     textDetails: FigmaTextDetails | null;
 
-    // Tokens/Styles linked to the Figma Library
     resolvedDesignTokens: {
-        component?: string;    // ID of the component
-        styles?: Record<string, string>; // e.g., { "fill": "token-id" }
+        component?: string;
+        styles?: Record<string, string>;
     };
 }
 
