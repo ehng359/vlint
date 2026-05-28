@@ -1,11 +1,11 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
-import { applyStyleFixes, extractStyles, FigmaElement, FigmaPage, hasFileBeenUpdated, queryFigmaStyles, StyleFix } from '@vlint/core';
+import { extractDataFigmaNames, FigmaPage, hasFileBeenUpdated, queryFigmaStyles } from '@vlint/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-
+// ─── Manifest Parser ──────────────────────────────────────────────────────────
+// Reads key=value pairs from design.manifest, ignoring blank lines and comments.
+// Called on activation and again whenever design.manifest is saved.
 function parseManifest(filePath: string): Record<string, string> {
 	const content = fs.readFileSync(filePath, 'utf-8');
 	return Object.fromEntries(
@@ -16,6 +16,9 @@ function parseManifest(filePath: string): Record<string, string> {
 	);
 }
 
+// ─── Value Normalisation ──────────────────────────────────────────────────────
+// Ensures equivalent values in different formats compare as equal.
+// e.g. "16px" === 16, "#FFF" === "#ffffff", "Bold" === 700
 function normaliseValue(value: string | number): string {
 	const str = String(value).trim();
 
@@ -59,224 +62,248 @@ function normaliseValue(value: string | number): string {
 	return str.toLowerCase();
 }
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
-export function activate(context: vscode.ExtensionContext) {
+function hasAliasConfigured(workspaceRoot: string): boolean {
+	const tsconfig = path.join(workspaceRoot, 'tsconfig.json');
+	if (!fs.existsSync(tsconfig)) return false;
+	const content = JSON.parse(fs.readFileSync(tsconfig, 'utf-8'));
+	return !!content?.compilerOptions?.paths?.['@/*'];
+}
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "vlint" is now active!');
+// ─── Activation ───────────────────────────────────────────────────────────────
+// Called once when the extension is first activated (i.e. on first .tsx save).
+export function activate(context: vscode.ExtensionContext) {
+	console.log('[vlint] Extension activated.');
+
 	const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
-	const manifestPath = path.join(workspaceRoot!, "design.manifest")
-	const designRefPath = path.join(workspaceRoot!, "DESIGN_REF.json")
+	const manifestPath = path.join(workspaceRoot!, "design.manifest");
+	const designRefPath = path.join(workspaceRoot!, "DESIGN_REF.json");
 
 	let manifest = parseManifest(manifestPath);
+
+	// designRefContent is the parsed DESIGN_REF.json held in memory.
+	// It is loaded from disk on activation, then kept fresh by the save handler.
 	let designRefContent: FigmaPage;
 	if (fs.existsSync(designRefPath)) {
-		designRefContent = JSON.parse(fs.readFileSync(designRefPath).toString())
+		const parsed = JSON.parse(fs.readFileSync(designRefPath).toString());
+		// If the cached file predates CSS generation, force a fresh fetch on next save.
+		// generatedCss and typographyCss were added in the CSS-layer refactor.
+		if (!parsed.generatedCss) {
+			console.log('[vlint] DESIGN_REF.json is stale — will re-fetch on next save.');
+		} else {
+			designRefContent = parsed;
+		}
 	}
 
-	let init = true
+	// init forces a Figma fetch on the very first save after activation,
+	// even if the cooldown hasn't elapsed.
+	let init = true;
+
+	// Cooldown prevents hammering the Figma API on every keystroke-save.
+	// The metadata check (hasFileBeenUpdated) runs at most once per minute.
+	let lastCheckedAt = 0;
+	const CHECK_COOLDOWN_MS = 60_000;
 
 	const outputChannel = vscode.window.createOutputChannel('vlint');
 	outputChannel.show();
+
+	function ensureAliasConfigured(workspaceRoot: string): void {
+		const tsconfigPath = path.join(workspaceRoot, 'tsconfig.json');
+		if (fs.existsSync(tsconfigPath)) {
+			const tsconfig = JSON.parse(fs.readFileSync(tsconfigPath, 'utf-8'));
+			tsconfig.compilerOptions ??= {};
+			tsconfig.compilerOptions.paths ??= {};
+			if (!tsconfig.compilerOptions.paths['@/*']) {
+				tsconfig.compilerOptions.paths['@/*'] = ['./src/*'];
+				fs.writeFileSync(tsconfigPath, JSON.stringify(tsconfig, null, 2));
+				outputChannel.appendLine('[vlint] ✓ Added @ alias to tsconfig.json');
+			}
+		}
+
+		const viteConfigPath = path.join(workspaceRoot, 'vite.config.ts');
+		if (fs.existsSync(viteConfigPath)) {
+			let content = fs.readFileSync(viteConfigPath, 'utf-8');
+			if (!content.includes("'@'") && !content.includes('"@"')) {
+				content = content.replace(
+					'defineConfig({',
+					`defineConfig({\n  resolve: { alias: { '@': path.resolve(__dirname, 'src') } },`
+				);
+				if (!content.includes("import path")) {
+					content = `import path from 'path';\n` + content;
+				}
+				fs.writeFileSync(viteConfigPath, content);
+				outputChannel.appendLine('[vlint] ✓ Added @ alias to vite.config.ts');
+			}
+		}
+	}
+
+	if (!hasAliasConfigured(workspaceRoot!)) {
+		outputChannel.appendLine('[vlint] ⚠ No @ alias found in vite/webpack config. CSS imports may fail to resolve.');
+		ensureAliasConfigured(workspaceRoot!);
+	}
+
+	// ─── Save Handler ─────────────────────────────────────────────────────────
+	// Runs on every document save. Orchestration order matters — see step comments.
 	vscode.workspace.onDidSaveTextDocument(async (document: vscode.TextDocument) => {
+
+		// ── Step 0: Filter irrelevant files ──────────────────────────────────
+		// Re-parse the manifest when it changes so new tokens/keys take effect
+		// without needing to reload the window.
 		if (document.fileName === "design.manifest") {
 			manifest = parseManifest(manifestPath);
-			return
+			return;
 		}
 
-		const lang = document.languageId
-		if (lang !== "javascriptreact" && lang !== "typescriptreact") {
-			return
+		const lang = document.languageId;
+		if (lang !== "javascriptreact" && lang !== "typescriptreact") return;
+
+		// ── Step 1: Extract data-figma names from the saved document ─────────
+		// extractDataFigmaNames reads @design-frame for the frame name and
+		// scans all data-figma="X" attributes for component names.
+		// This must happen before any later step that references componentNames.
+		const documentContent = document.getText();
+		const [frameName, componentNames] = extractDataFigmaNames(documentContent);
+
+		// ── Step 2: Refresh Figma data if needed ─────────────────────────────
+		// Fetches fresh styles from Figma only when:
+		//   a) This is the first save since activation (init), OR
+		//   b) The cooldown has elapsed AND Figma reports a newer lastModified.
+		// On a cache hit, designRefContent and DESIGN_REF.json stay as-is.
+		const now = Date.now();
+		const cooldownElapsed = (now - lastCheckedAt) > CHECK_COOLDOWN_MS;
+
+		if (init || (cooldownElapsed && await hasFileBeenUpdated(manifest["FIGMA_FKEY"], manifest["FIGMA_PAT"]))) {
+			init = false;
+			lastCheckedAt = now;
+
+			outputChannel.appendLine('[vlint] Fetching latest styles from Figma...');
+			const figmaStyles = await queryFigmaStyles(
+				manifest["FIGMA_DEV_PAGE"],
+				manifest["FIGMA_FKEY"],
+				manifest["FIGMA_PAT"]
+			) as FigmaPage;
+
+			designRefContent = figmaStyles;
+
+			// Persist DESIGN_REF.json as the local source of truth.
+			// This file should be committed to version control so the team
+			// shares a consistent snapshot of the Figma spec.
+			const refUri = vscode.Uri.joinPath(
+				vscode.workspace.workspaceFolders![0].uri,
+				'DESIGN_REF.json'
+			);
+			await vscode.workspace.fs.writeFile(
+				refUri,
+				Buffer.from(JSON.stringify(figmaStyles, null, 2), 'utf8')
+			);
+			outputChannel.appendLine('[vlint] DESIGN_REF.json updated.');
 		}
 
-		// Query the Figma file if and only if it has been updated since. Otherwise
-		// refer to the DESIGN_REF.json file.
-		if (init || await hasFileBeenUpdated(manifest["FIGMA_FKEY"], manifest["FIGMA_PAT"])) {
-			init = false
-			// Read from the local workspace for the DESIGN_REF.md file when file updated.
-			const figmaStyles = await queryFigmaStyles(manifest["FIGMA_DEV_PAGE"], manifest["FIGMA_FKEY"], manifest["FIGMA_PAT"])
-			const fileUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0].uri!, 'DESIGN_REF.json');
-			const content = Buffer.from(JSON.stringify(figmaStyles, null, 2), 'utf8');
-			designRefContent = figmaStyles
+		// ── Step 3: Write CSS files ───────────────────────────────────────────
+		// Runs on every save using the cached designRefContent.
+		// All generated CSS lives under src/styles/figma/ (configurable via
+		// FIGMA_STYLES_DIR in design.manifest) so imports are always predictable.
+		//
+		// Two files are written:
+		//   {FrameName}.figma.css  — layout + visual styles, @layer figma
+		//   typography.figma.css   — text styles, @layer figma.typography
+		//
+		// Both layers sit below unlayered CSS, so developer overrides always win.
+		if (designRefContent) {
+			const figmaStylesDir = manifest["FIGMA_STYLES_DIR"] || 'src/styles/figma';
+			const figmaStylesUri = vscode.Uri.joinPath(
+				vscode.workspace.workspaceFolders![0].uri,
+				...figmaStylesDir.split('/')
+			);
 
-			// This handles the writing natively
-			await vscode.workspace.fs.writeFile(fileUri, content);
+			for (const [frame, css] of Object.entries(designRefContent.generatedCss || {})) {
+				if (!css) continue;
+				const cssUri = vscode.Uri.joinPath(figmaStylesUri, `${frame}.figma.css`);
+				await vscode.workspace.fs.writeFile(cssUri, Buffer.from(css as string, 'utf8'));
+				outputChannel.appendLine(`[vlint] Written ${figmaStylesDir}/${frame}.figma.css`);
+			}
+
+			if (designRefContent.typographyCss) {
+				const typoUri = vscode.Uri.joinPath(figmaStylesUri, 'typography.figma.css');
+				await vscode.workspace.fs.writeFile(
+					typoUri,
+					Buffer.from(designRefContent.typographyCss, 'utf8')
+				);
+				outputChannel.appendLine(`[vlint] Written ${figmaStylesDir}/typography.figma.css`);
+			}
 		}
 
-		let documentContent = document.getText()
-		const [frameName, styleMapping] = extractStyles(documentContent)
-
-		outputChannel.appendLine(JSON.stringify(styleMapping, null, 2))
-		outputChannel.show()
-
-		// TODO: Make direct comparisons between key information within this file and corresponding Figma file.
-		// Use the extracted style from the current document and compare to the design reference
-		const frameContent = designRefContent.nodes[frameName]
+		// ── Step 4: Guard against missing frame ───────────────────────────────
+		// If the @design-frame annotation doesn't match any frame in DESIGN_REF.json,
+		// there's nothing to compare against — bail early with a clear error.
+		const frameContent = designRefContent?.nodes[frameName];
 		if (!frameContent) {
-			// Frame doesn't exist, create some kind of flag
 			outputChannel.appendLine(`[Error] Frame "${frameName}" not found in DESIGN_REF.json`);
-			return
+			return;
 		}
 
-		// Track mismatches to report at the end
+		// ── Step 5: Mismatch reporting ────────────────────────────────────────
+		// Cross-references every data-figma name in the document against
+		// the Figma frame. Reports components that exist in code but are
+		// absent from the Figma spec — likely a rename or deletion upstream.
+		// No source edits happen here; this is read-only reporting.
 		const mismatches: string[] = [];
 
-		Object.entries(styleMapping).forEach(([componentName, codeStyles]) => {
-			// 1. Find the corresponding element in the Figma reference
-			const figmaElement = frameContent.children[componentName]
-
-			if (!figmaElement) {
-				mismatches.push(`Component "${componentName}" exists in code but not in Figma frame.`);
-				return;
-			}
-
-			// 2. Cross-check specific style properties (e.g., color, spacing)
-			// Assuming codeStyles and figmaElement.styles share similar keys
-			let componentMatch = true;
-
-			for (const style of codeStyles) {
-				const figmaValue = figmaElement[style.propName as keyof FigmaElement];
-				if (figmaValue === undefined) {
-					outputChannel.appendLine(`[Warn] Property "${style.propName}" not found in Figma for "${componentName}"`);
-					continue;
-				}
-
-				// AFTER
-				if (normaliseValue(style.actualValue as string | number) !== normaliseValue(figmaValue as string | number)) {
-					mismatches.push(`
-						Style Mismatch in "${componentName}": 
-							Property: ${style.propName}
-							Code: ${style.actualValue} 
-							Figma: ${figmaValue}
-						`
-					);
-					componentMatch = false;
-				}
-			}
-
-			if (componentMatch) {
-				outputChannel.appendLine(`${componentName} matches Figma spec.`);
-			}
-		});
-		const pendingFixes: StyleFix[] = [];  // <-- structured fixes to apply
-
-		Object.entries(styleMapping).forEach(([componentName, codeStyles]) => {
+		for (const componentName of componentNames) {
 			const figmaElement = frameContent.children[componentName];
+
 			if (!figmaElement) {
-				mismatches.push(`Component "${componentName}" exists in code but not in Figma frame.`);
-				return;
-			}
-
-			let componentMatch = true;
-
-			for (const style of codeStyles) {
-				// Actively catch backgroundColor written onto TEXT nodes by a previous
-				// bad extraction — swap it to color using the figma fill value
-				if (figmaElement.type === 'TEXT' && style.propName === 'backgroundColor') {
-					const correctColor = figmaElement.color as string | undefined;
-					if (correctColor) {
-						mismatches.push(`TEXT node "${componentName}" has backgroundColor in code — replacing with color: ${correctColor}`);
-						pendingFixes.push({ componentName, propName: 'backgroundColor', figmaValue: '' });   // remove it
-						pendingFixes.push({ componentName, propName: 'color', figmaValue: correctColor });   // add correct one
-					}
-					componentMatch = false;
-					continue;
-				}
-
-				const figmaValue = figmaElement[style.propName as keyof FigmaElement];
-
-				if (figmaValue === undefined) {
-					outputChannel.appendLine(`[Warn] Property "${style.propName}" not found in Figma for "${componentName}"`);
-					continue;
-				}
-
-				if (normaliseValue(style.actualValue as string | number) !== normaliseValue(figmaValue as string | number)) {
-					mismatches.push(
-						`Style Mismatch in "${componentName}": ${style.propName} — Code: ${style.actualValue}, Figma: ${figmaValue}`
-					);
-					componentMatch = false;
-
-					const isTextBackgroundLeak = figmaElement.type === 'TEXT' && style.propName === 'backgroundColor';
-					if (!isTextBackgroundLeak) {
-						pendingFixes.push({
-							componentName,
-							propName: style.propName,
-							figmaValue: figmaValue as string | number,
-						});
-					}
-				}
-			}
-
-			// Keys that are Figma/extraction metadata, not CSS properties
-			const FIGMA_METADATA_KEYS = new Set([
-				'id', 'name', 'type', 'resolvedDesignTokens', 'variables',
-				'layoutAlign', 'layoutGrow', 'minWidth', 'maxWidth',
-				'children', 'childrenElements', 'boxSizing',
-				'primaryAxisSizingMode', 'counterAxisSizingMode'
-			]);
-
-			const codePropNames = new Set(codeStyles.map(s => s.propName));
-
-			for (const [prop, figmaValue] of Object.entries(figmaElement)) {
-				if (FIGMA_METADATA_KEYS.has(prop)) continue;
-				if (codePropNames.has(prop)) continue;
-				if (figmaValue === null || figmaValue === undefined) continue;
-				if (typeof figmaValue === 'object') continue;
-
-				// Fixed: was comparing figmaValue to itself (always false)
-				const isTextBackgroundLeak = figmaElement.type === 'TEXT' && prop === 'backgroundColor';
-				if (!isTextBackgroundLeak) {
-					mismatches.push(`Missing in code — "${componentName}.${prop}": Figma has ${figmaValue}`);
-					pendingFixes.push({
-						componentName,
-						propName: prop,
-						figmaValue: figmaValue as string | number,
-					});
-				}
-			}
-
-			if (componentMatch) {
-				outputChannel.appendLine(`✓ ${componentName} matches Figma spec.`);
-			}
-		});
-
-		// Apply all queued fixes in a single pass if any mismatches were found
-		if (pendingFixes.length > 0) {
-			outputChannel.appendLine(`\n[vlint] Applying ${pendingFixes.length} fix(es)...`);
-
-			const originalSource = document.getText();
-			const fixedSource = applyStyleFixes(originalSource, pendingFixes);
-
-			if (fixedSource !== originalSource) {
-				const edit = new vscode.WorkspaceEdit();
-				const fullRange = new vscode.Range(
-					document.positionAt(0),
-					document.positionAt(originalSource.length)
+				mismatches.push(
+					`[Warn] "${componentName}" has data-figma attribute but no match in Figma frame.`
 				);
-
-				edit.replace(document.uri, fullRange, fixedSource);
-
-				const success = await vscode.workspace.applyEdit(edit);
-
-				if (success) {
-					outputChannel.appendLine(`[vlint] ✓ Source updated. Saving...`);
-					await document.save(); // persist to disk
-				} else {
-					outputChannel.appendLine(`[vlint] ✗ WorkspaceEdit failed — no changes written.`);
-				}
+				continue;
 			}
+
+			outputChannel.appendLine(`✓ ${componentName} found in Figma spec.`);
 		}
 
-		// Surface mismatches regardless of whether fixes were applied
 		if (mismatches.length > 0) {
 			outputChannel.appendLine("\n[vlint] Mismatches detected:");
 			mismatches.forEach(m => outputChannel.appendLine(m));
 		}
-	})
 
+		// ── Step 6: Inject CSS import ─────────────────────────────────────────
+		// Adds the frame's .figma.css import to the top of the file if absent.
+		// Uses the @/ alias so the path is stable regardless of where the
+		// component lives in the directory tree.
+		// Only writes if the import is genuinely missing to avoid save loops.
+		const figmaStylesDir = manifest["FIGMA_STYLES_DIR"] || 'src/styles/figma';
+		const cssImportLine = `import '@/styles/figma/${frameName}.figma.css';`;
+		const alreadyImported = documentContent.includes(`styles/figma/${frameName}.figma.css`);
+
+		const figmaStylesUri = vscode.Uri.joinPath(
+			vscode.workspace.workspaceFolders![0].uri,
+			...figmaStylesDir.split('/')
+		);
+		const cssUri = vscode.Uri.joinPath(figmaStylesUri, `${frameName}.figma.css`);
+		const cssFileExists = await vscode.workspace.fs.stat(cssUri).then(() => true, () => false);
+
+		if (!alreadyImported && cssFileExists) {
+			const finalSource = cssImportLine + '\n' + documentContent;
+			const edit = new vscode.WorkspaceEdit();
+			edit.replace(
+				document.uri,
+				new vscode.Range(
+					document.positionAt(0),
+					document.positionAt(documentContent.length)
+				),
+				finalSource
+			);
+			const success = await vscode.workspace.applyEdit(edit);
+			if (success) {
+				outputChannel.appendLine(`[vlint] ✓ CSS import injected. Saving...`);
+				await document.save();
+			} else {
+				outputChannel.appendLine(`[vlint] ✗ Failed to inject CSS import.`);
+			}
+		}
+	});
 }
 
-// This method is called when your extension is deactivated
+// ─── Deactivation ─────────────────────────────────────────────────────────────
+// Nothing to clean up currently — VSCode disposes the save listener automatically.
 export function deactivate() { }

@@ -25,45 +25,18 @@ const PARSE_OPTIONS: ParserOptions = {
 
 const ANNOTATION_RE = /@design-component\s+(\S+)/;
 
-export function extractStyles(sourceCode: string): [string, Record<string, StyleProp[]>] {
-  let ast;
-
-  try {
-    ast = parse(sourceCode, PARSE_OPTIONS);
-  } catch (err: unknown) {
-    console.warn("[vlint] Parse error:", (err as Error).message);
-    return ["", {}];
-  }
-
-  // Define a state object to collect data during traversal
-  const state = {
-    frame: "",
-    findings: {} as Record<string, StyleProp[]>
-  };
-
+export function extractDataFigmaNames(sourceCode: string): [string, string[]] {
   const frameMatch = sourceCode.match(/@design-frame\s+(\S+)/);
+  const frame = frameMatch ? frameMatch[1] : "";
 
-  if (frameMatch) {
-    state.frame = frameMatch[1];
+  const names: string[] = [];
+  const re = /data-figma="([^"]+)"/g;
+  let match;
+  while ((match = re.exec(sourceCode)) !== null) {
+    names.push(match[1]);
   }
 
-  traverse(ast, {
-    JSXOpeningElement(path, state) {
-      const componentName = getDesignAnnotation(path);
-      if (!componentName) return;
-
-      const styleProps = extractStyleProps(path);
-
-      // Always register the component so extension.ts can still
-      // run the Figma comparison even when style is absent or empty
-      state.findings[componentName] = [
-        ...(state.findings[componentName] || []),
-        ...styleProps
-      ];
-    },
-  }, undefined, state);
-
-  return [state.frame, state.findings];
+  return [frame, names];
 }
 
 function getDesignAnnotation(path: NodePath<JSXOpeningElement>): string | null {
