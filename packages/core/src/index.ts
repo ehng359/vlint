@@ -122,7 +122,6 @@ interface FigmaPage {
     generatedCss: {
         [frameName: string]: string;
     };
-    typographyCss: string;
 }
 
 export {

@@ -2,13 +2,48 @@ const fs = require("fs")
 const FIGMA_API_URL = "https://api.figma.com/v1";
 let lastKnownChange = null;
 
+// non-CSS Figma internals
 const FIGMA_METADATA_KEYS = new Set([
-    'id', 'name', 'type', 'resolvedDesignTokens', 'variables',
-    'layoutAlign', 'layoutGrow', 'minWidth', 'maxWidth',
-    'children', 'childrenElements', 'boxSizing',
+    // Identity — never CSS
+    'id', 'name', 'type',
+    // Raw Figma data objects — never CSS
+    'resolvedDesignTokens', 'variables',
+    'visuals', 'textDetails', 'visualDimensions',
+    // Tree references — never CSS
+    'children', 'childrenElements',
+    // Figma layout enums — transformed to CSS equivalents, raw values must never leak
+    'layoutMode', 'layoutAlign', 'layoutGrow',
     'primaryAxisSizingMode', 'counterAxisSizingMode',
-    'borderRadius', 'padding', 'visuals', 'textDetails', 'visualDimensions',
-    'layoutMode', 'itemSpacing', 'alignItems', 'justifyContent'
+    'itemSpacing', 'minWidth', 'maxWidth',
+]);
+// CSS property default values — skip these to keep generated files clean.
+// A property matching its browser default adds no value to the stylesheet.
+const CSS_DEFAULTS = {
+    display: 'block',
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
+    gap: '0px',
+    padding: '0px 0px',
+    borderRadius: '0px',
+    opacity: '1',
+    overflow: 'visible',
+    textAlign: 'left',
+    fontStyle: 'normal',
+    textDecoration: 'none',
+    textTransform: 'none',
+    letterSpacing: '0em',
+    marginBottom: '0px',
+    textIndent: '0px',
+};
+
+// All CSS properties that are typography-specific.
+// These are written to typography.figma.css only, not to layout CSS.
+const TYPOGRAPHY_PROPS = new Set([
+    'fontFamily', 'fontSize', 'fontWeight', 'fontStyle',
+    'lineHeight', 'letterSpacing', 'textAlign', 'textTransform',
+    'textDecoration', 'textIndent', 'color',
+    'marginBottom', 'hangingPunctuation'
 ]);
 
 function camelToKebab(str) {
@@ -143,8 +178,8 @@ function parseTargetedNodes(apiData) {
             effects: node.effects || []
         },
         textDetails: node.type === "TEXT" ? {
-          text: node.characters || "",
-          fontStyle: node.style || {}
+            text: node.characters || "",
+            style: node.style || {}       // ← correct key
         } : null,
         resolvedDesignTokens: {}
       };
@@ -287,12 +322,28 @@ async function queryFigmaStyles(page, fileKey, accessToken) {
     console.log(registry)
     figmaNodes.nodes = registry
 
-    // Attach generated CSS to result so extension.ts can write the files
+    // Prime lastKnownChange so the first hasFileBeenUpdated call after
+    // this fetch has a real baseline — without this it always returns false
+    // on the first check because lastKnownChange is still null
+    try {
+        const metaResponse = await fetch(
+            `${FIGMA_API_URL}/files/${fileKey}?depth=1`,
+            { method: "GET", headers: { 'X-Figma-Token': accessToken } }
+        );
+        if (metaResponse.ok) {
+            const meta = await metaResponse.json();
+            lastKnownChange = meta.lastModified;
+            console.log(`[vlint] Baseline timestamp set: ${lastKnownChange}`);
+        }
+    } catch (e) {
+        console.warn('[vlint] Could not prime lastKnownChange:', e);
+    }
+
     figmaNodes.generatedCss = {};
     for (const [frameName, frame] of Object.entries(registry)) {
         figmaNodes.generatedCss[frameName] = generateLayoutCss(frameName, frame.children || {});
     }
-    figmaNodes.typographyCss = generateTypographyCss(registry);
+
     return figmaNodes;
 }
 
@@ -452,13 +503,56 @@ function mapFigmaToCss(node) {
     }
 
     // --- 3. TYPOGRAPHY ---
-    if (node.type === "TEXT" && node.textDetails?.style) {
+    // node.textDetails.style mirrors the Figma REST API's `style` object on TEXT nodes
+    if (node.type === "TEXT" && node.textDetails && node.textDetails.style) {
         const s = node.textDetails.style;
-        css.fontFamily = s.fontFamily;
-        css.fontSize = `${s.fontSize}px`;
-        css.fontWeight = s.fontWeight;
-        css.textAlign = s.textAlignHorizontal?.toLowerCase() || 'left';
-        if (s.lineHeightPx) css.lineHeight = `${Math.round(s.lineHeightPx)}px`;
+
+        if (s.fontFamily)  css.fontFamily  = `"${s.fontFamily}", sans-serif`;
+        if (s.fontSize)    css.fontSize    = `${s.fontSize}px`;
+        if (s.fontWeight)  css.fontWeight  = s.fontWeight;
+        if (s.italic)      css.fontStyle   = 'italic';
+
+        // lineHeightUnit can be AUTO, PIXELS, or PERCENT
+        if (s.lineHeightUnit === "PIXELS" && s.lineHeightPx) {
+            css.lineHeight = `${Math.round(s.lineHeightPx)}px`;
+        } else if (s.lineHeightUnit === "PERCENT" && s.lineHeightPercentFontSize) {
+            css.lineHeight = `${s.lineHeightPercentFontSize}%`;
+        }
+
+        // Figma letterSpacing is in px — convert to em for scalability
+        if (s.letterSpacing && s.letterSpacing !== 0) {
+            css.letterSpacing = `${(s.letterSpacing / s.fontSize).toFixed(4)}em`;
+        }
+
+        if (s.textAlignHorizontal) {
+            css.textAlign = s.textAlignHorizontal.toLowerCase().replace('justified', 'justify');
+        }
+
+        if (s.textDecoration && s.textDecoration !== 'NONE') {
+            const decorationMap = {
+                'UNDERLINE':     'underline',
+                'STRIKETHROUGH': 'line-through'
+            };
+            css.textDecoration = decorationMap[s.textDecoration] || s.textDecoration.toLowerCase();
+        }
+
+        if (s.textCase && s.textCase !== 'ORIGINAL') {
+            const caseMap = {
+                'UPPER':      'uppercase',
+                'LOWER':      'lowercase',
+                'TITLE':      'capitalize',
+                'SMALL_CAPS': 'small-caps'
+            };
+            css.textTransform = caseMap[s.textCase];
+        }
+
+        if (s.paragraphSpacing && s.paragraphSpacing > 0) {
+            css.marginBottom = `${s.paragraphSpacing}px`;
+        }
+
+        if (s.paragraphIndent && s.paragraphIndent > 0) {
+            css.textIndent = `${s.paragraphIndent}px`;
+        }
     }
 
     // --- 4. AUTO-LAYOUT ---
@@ -483,17 +577,30 @@ function mapFigmaToCss(node) {
     // --- 6. CLEANUP & MERGE ---
     // Destructure properties we want to REMOVE from the final object
     const {
-      layoutMode,
-      primaryAxisSizingMode,
-      counterAxisSizingMode,
-      itemSpacing,
-      alignItems,
-      justifyContent,
-      padding,
-      visuals,
-      textDetails,
-      visualDimensions,
-      ...remainingMetadata
+        // Figma layout primitives — already mapped to css.display, css.flexDirection etc.
+        layoutMode,
+        primaryAxisSizingMode,
+        counterAxisSizingMode,
+        itemSpacing,
+        layoutAlign,        // mapped to css.alignSelf
+        layoutGrow,         // mapped to css.flex
+        // Figma enums — mapped to CSS equivalents, raw "MIN"/"MAX" must not leak
+        alignItems,         // "MIN" → css.alignItems: "flex-start"
+        justifyContent,     // "MIN" → css.justifyContent: "flex-start"
+        // Figma objects — mapped to CSS strings, raw objects must not leak
+        padding,            // {top,right,bottom,left} → css.padding: "20px 24px"
+        borderRadius,       // 12 → css.borderRadius: "12px"
+        // Raw Figma data — never CSS
+        visuals,
+        textDetails,
+        visualDimensions,
+        resolvedDesignTokens,
+        variables,
+        minWidth,
+        maxWidth,
+        children,
+        childrenElements,
+        ...remainingMetadata  // now only contains id, name, type — filtered by FIGMA_METADATA_KEYS
     } = node;
 
     return {
@@ -503,57 +610,72 @@ function mapFigmaToCss(node) {
 }
 
 function generateLayoutCss(frameName, childrenMap) {
-    const blocks = [];
+    const layoutBlocks = [];
+    const typographyBlocks = [];
 
     for (const [componentName, props] of Object.entries(childrenMap)) {
-        if (props.type === "TEXT") continue; // typography goes to its own file
-
-        const declarations = Object.entries(props)
-            .filter(([k]) => !FIGMA_METADATA_KEYS.has(k))
-            .filter(([_, v]) => v !== null && v !== undefined && typeof v !== 'object')
-            .map(([k, v]) => `    ${camelToKebab(k)}: ${v};`)
-            .join('\n');
-
-        if (declarations) {
-            blocks.push(`[data-figma="${componentName}"] {\n${declarations}\n}`);
-        }
-    }
-
-    if (blocks.length === 0) return '';
-
-    return [
-        `/* ${frameName}.figma.css — auto-generated by vlint, do not edit */`,
-        blocks.map(b => b.split('\n').map(l => '    ' + l).join('\n')).join('\n\n'),
-    ].join('\n');
-}
-
-function generateTypographyCss(registry) {
-    const blocks = [];
-    const TYPOGRAPHY_PROPS = new Set([
-        'fontFamily', 'fontSize', 'fontWeight',
-        'lineHeight', 'letterSpacing', 'textAlign', 'color'
-    ]);
-
-    for (const [, frame] of Object.entries(registry)) {
-        for (const [componentName, props] of Object.entries(frame.children || {})) {
+        if (props.type === "TEXT") {
+            // ── Typography block ────────────────────────────────────────────
             const declarations = Object.entries(props)
                 .filter(([k]) => TYPOGRAPHY_PROPS.has(k))
-                .filter(([_, v]) => v !== null && v !== undefined)
-                .map(([k, v]) => `    ${camelToKebab(k)}: ${v};`)
+                .filter(([_, v]) => v !== null && v !== undefined && v !== '')
+                .filter(([k, v]) => {
+                    const def = CSS_DEFAULTS[k];
+                    return def === undefined || String(v) !== String(def);
+                })
+                .map(([k, v]) => `        ${camelToKebab(k)}: ${v};`)
                 .join('\n');
 
             if (declarations) {
-                blocks.push(`[data-figma="${componentName}"] {\n${declarations}\n}`);
+                typographyBlocks.push(`    [data-figma="${componentName}"] {\n${declarations}\n    }`);
+            }
+        } else {
+            // ── Layout block ────────────────────────────────────────────────
+            const declarations = Object.entries(props)
+                .filter(([k]) => !FIGMA_METADATA_KEYS.has(k))
+                .filter(([k]) => !TYPOGRAPHY_PROPS.has(k))
+                .filter(([_, v]) => v !== null && v !== undefined && v !== '' && typeof v !== 'object')
+                .filter(([k, v]) => {
+                    const def = CSS_DEFAULTS[k];
+                    return def === undefined || String(v) !== String(def);
+                })
+                .map(([k, v]) => `        ${camelToKebab(k)}: ${v};`)
+                .join('\n');
+
+            if (declarations) {
+                layoutBlocks.push(`    [data-figma="${componentName}"] {\n${declarations}\n    }`);
             }
         }
     }
 
-    if (blocks.length === 0) return '';
+    if (layoutBlocks.length === 0 && typographyBlocks.length === 0) return '';
 
-    return [
-        `/* typography.figma.css — auto-generated by vlint, do not edit */`,
-        blocks.map(b => b.split('\n').map(l => '    ' + l).join('\n')).join('\n\n'),
-    ].join('\n');
+    const sections = [
+        `/* ${frameName}.figma.css — auto-generated by vlint, do not edit */`,
+        `/* Developer styles always win — @layer figma sits below unlayered CSS */`,
+        `/* Within this file: figma.layout < figma.typography < unlayered styles */`,
+        `@layer figma.layout, figma.typography;`,
+        '',
+    ];
+
+    if (layoutBlocks.length > 0) {
+        sections.push(
+            `@layer figma.layout {`,
+            layoutBlocks.join('\n\n'),
+            `}`,
+            ''
+        );
+    }
+
+    if (typographyBlocks.length > 0) {
+        sections.push(
+            `@layer figma.typography {`,
+            typographyBlocks.join('\n\n'),
+            `}`
+        );
+    }
+
+    return sections.join('\n');
 }
 
-module.exports = { queryFigmaStyles, hasFileBeenUpdated, generateLayoutCss, generateTypographyCss };
+module.exports = { queryFigmaStyles, hasFileBeenUpdated, generateLayoutCss };

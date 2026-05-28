@@ -101,7 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Cooldown prevents hammering the Figma API on every keystroke-save.
 	// The metadata check (hasFileBeenUpdated) runs at most once per minute.
 	let lastCheckedAt = 0;
-	const CHECK_COOLDOWN_MS = 60_000;
+	const CHECK_COOLDOWN_MS = 5_000;
 
 	const outputChannel = vscode.window.createOutputChannel('vlint');
 	outputChannel.show();
@@ -168,12 +168,23 @@ export function activate(context: vscode.ExtensionContext) {
 		//   a) This is the first save since activation (init), OR
 		//   b) The cooldown has elapsed AND Figma reports a newer lastModified.
 		// On a cache hit, designRefContent and DESIGN_REF.json stay as-is.
+		// AFTER
 		const now = Date.now();
 		const cooldownElapsed = (now - lastCheckedAt) > CHECK_COOLDOWN_MS;
 
-		if (init || (cooldownElapsed && await hasFileBeenUpdated(manifest["FIGMA_FKEY"], manifest["FIGMA_PAT"]))) {
-			init = false;
+		let shouldFetch = init;
+
+		if (!init && cooldownElapsed) {
+			// Always advance lastCheckedAt when a check is attempted — prevents
+			// hammering the API on every save once the cooldown elapses
 			lastCheckedAt = now;
+			const updated = await hasFileBeenUpdated(manifest["FIGMA_FKEY"], manifest["FIGMA_PAT"]);
+			if (updated) shouldFetch = true;
+		}
+
+		if (shouldFetch) {
+			init = false;
+			if (cooldownElapsed || lastCheckedAt === 0) lastCheckedAt = now;
 
 			outputChannel.appendLine('[vlint] Fetching latest styles from Figma...');
 			const figmaStyles = await queryFigmaStyles(
@@ -184,9 +195,6 @@ export function activate(context: vscode.ExtensionContext) {
 
 			designRefContent = figmaStyles;
 
-			// Persist DESIGN_REF.json as the local source of truth.
-			// This file should be committed to version control so the team
-			// shares a consistent snapshot of the Figma spec.
 			const refUri = vscode.Uri.joinPath(
 				vscode.workspace.workspaceFolders![0].uri,
 				'DESIGN_REF.json'
@@ -220,15 +228,6 @@ export function activate(context: vscode.ExtensionContext) {
 				const cssUri = vscode.Uri.joinPath(figmaStylesUri, `${frame}.figma.css`);
 				await vscode.workspace.fs.writeFile(cssUri, Buffer.from(css as string, 'utf8'));
 				outputChannel.appendLine(`[vlint] Written ${figmaStylesDir}/${frame}.figma.css`);
-			}
-
-			if (designRefContent.typographyCss) {
-				const typoUri = vscode.Uri.joinPath(figmaStylesUri, 'typography.figma.css');
-				await vscode.workspace.fs.writeFile(
-					typoUri,
-					Buffer.from(designRefContent.typographyCss, 'utf8')
-				);
-				outputChannel.appendLine(`[vlint] Written ${figmaStylesDir}/typography.figma.css`);
 			}
 		}
 
