@@ -83,20 +83,21 @@ export function activate(context: vscode.ExtensionContext) {
 	// designRefContent is the parsed DESIGN_REF.json held in memory.
 	// It is loaded from disk on activation, then kept fresh by the save handler.
 	let designRefContent: FigmaPage;
+
+	// init forces a Figma fetch on the very first save after activation,
+	// even if the cooldown hasn't elapsed.
+	let init = true
 	if (fs.existsSync(designRefPath)) {
 		const parsed = JSON.parse(fs.readFileSync(designRefPath).toString());
-		// If the cached file predates CSS generation, force a fresh fetch on next save.
-		// generatedCss and typographyCss were added in the CSS-layer refactor.
 		if (!parsed.generatedCss) {
 			console.log('[vlint] DESIGN_REF.json is stale — will re-fetch on next save.');
 		} else {
 			designRefContent = parsed;
 		}
+	} else {
+		// File doesn't exist — force a fetch on next save
+		init = true;
 	}
-
-	// init forces a Figma fetch on the very first save after activation,
-	// even if the cooldown hasn't elapsed.
-	let init = true;
 
 	// Cooldown prevents hammering the Figma API on every keystroke-save.
 	// The metadata check (hasFileBeenUpdated) runs at most once per minute.
@@ -144,6 +145,10 @@ export function activate(context: vscode.ExtensionContext) {
 	// ─── Save Handler ─────────────────────────────────────────────────────────
 	// Runs on every document save. Orchestration order matters — see step comments.
 	vscode.workspace.onDidSaveTextDocument(async (document: vscode.TextDocument) => {
+		if (!fs.existsSync(designRefPath)) {
+			init = true;
+		}
+
 		if (!fs.existsSync(manifestPath)) {
 			outputChannel.appendLine('[vlint] No design.manifest found. Create one at the worksapce root to get started.')
 			outputChannel.appendLine('[vlint] Required keys: FIGMA_PAT, FIGMA_FKEY, FIGMA_DEV_PAGE, FIGMA_STYLES_DIR')

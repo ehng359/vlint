@@ -2,7 +2,7 @@
   "name": "vlint",
   "displayName": "vlint - Figma-based Visual Linter",
   "description": "Automatic visual linter for design-to-development workflows.",
-  "version": "0.0.2",
+  "version": "0.0.4",
   "engines": {
     "vscode": "^1.118.0"
   },
