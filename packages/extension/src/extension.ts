@@ -144,7 +144,10 @@ export function activate(context: vscode.ExtensionContext) {
 	// ─── Save Handler ─────────────────────────────────────────────────────────
 	// Runs on every document save. Orchestration order matters — see step comments.
 	vscode.workspace.onDidSaveTextDocument(async (document: vscode.TextDocument) => {
-
+		if (!fs.existsSync(manifestPath)) {
+			outputChannel.appendLine('[vlint] No design.manifest found. Create one at the worksapce root to get started.')
+			outputChannel.appendLine('[vlint] Required keys: FIGMA_PAT, FIGMA_FKEY, FIGMA_DEV_PAGE, FIGMA_STYLES_DIR')
+		}
 		// ── Step 0: Filter irrelevant files ──────────────────────────────────
 		// Re-parse the manifest when it changes so new tokens/keys take effect
 		// without needing to reload the window.
