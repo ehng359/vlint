@@ -1,3 +1,12 @@
+../**
+../../**
+!dist/extension.js
+!package.json
+!readme.md
+!LICENSE.txt
+!changelog.md
+**/*.map
+dist/**/*.map
 .vscode/**
 .vscode-test/**
 out/**

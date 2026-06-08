@@ -1,8 +1,8 @@
 {
   "name": "vlint",
-  "displayName": "vlint",
+  "displayName": "vlint - Figma-based Visual Linter",
   "description": "Automatic visual linter for design-to-development workflows.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.118.0"
   },
@@ -10,7 +10,8 @@
     "Other"
   ],
   "activationEvents": [
-    "*"
+    "onLanguage:typescriptreact",
+    "onLanguage:javascriptreact"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -25,11 +26,15 @@
       }
     ]
   },
+  "publisher": "EdwardNg",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ehng359/vlint"
+  },
   "scripts": {
-    "vscode:prepublish": "npm run package",
-    "compile": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
-    "watch": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
-    "package": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "vscode:prepublish": "echo 'Use build.sh to package'",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@babel/parser --external:@babel/traverse --external:@babel/generator --external:@babel/types --external:@babel/core --format=cjs --platform=node --minify",
+    "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
@@ -37,15 +42,20 @@
     "test": "vscode-test"
   },
   "dependencies": {
-    "@vlint/core": "*"
+    "@babel/core": "^7.29.7",
+    "@babel/generator": "^7.29.7",
+    "@babel/parser": "^7.29.7",
+    "@babel/traverse": "^7.29.7",
+    "@babel/types": "^7.29.7",
+    "@types/babel__traverse": "^7.28.0"
   },
   "devDependencies": {
-    "@types/babel__traverse": "^7.28.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.18",
     "@types/vscode": "^1.118.0",
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.28.0",
     "eslint": "^9.39.3",
     "ts-loader": "^9.5.4",
     "typescript": "^5.9.3",

@@ -13,8 +13,10 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "dotenv": "^17.4.2"
+    "dotenv": "^17.4.2",
+    "esbuild": "^0.28.0"
   },
+  "publisher": "EdwardNg",
   "devDependencies": {
     "@babel/parser": "^7.29.3",
     "@babel/traverse": "^7.29.0",
@@ -23,6 +25,7 @@
     "tsup": "^8.5.1"
   },
   "workspaces": [
-    "packages/*"
+    "packages/core",
+    "packages/extension"
   ]
 }

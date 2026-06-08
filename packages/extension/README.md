@@ -1,71 +1,229 @@
-# vlint README
+# vlint: Visual Linter for Design-to-Development
 
-This is the README for your extension "vlint". After writing up a brief description, we recommend including the following sections.
-
-## Features
-
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
-
-## Requirements
-
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
-
-## Extension Settings
-
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
+> A VS Code extension that enforces a binding contract between Figma design specifications and their React implementations using static AST analysis and the Figma REST API.
 
 ---
 
-## Following extension guidelines
+## Overview
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+**vlint** bridges the gap between design and engineering by introducing a formal, verifiable relationship between a Figma component and its corresponding code. Rather than relying on manual design reviews or visual QA, vlint treats the Figma file as a typed source of truth and statically validates that the implementation honours it — at save time, in the editor.
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+The core primitive is the **Design-Code Contract**: when a developer annotates a component with `@design-component`, they are making an explicit declaration that the annotated code is the canonical implementation of a named Figma node. The extension holds them accountable to that declaration by diffing the extracted Figma styles against the inline styles present in the JSX.
 
-## Working with Markdown
+```tsx
+// @design-frame Dashboard
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+// @design-component Dashboard
+const Dashboard = () => (
+  <div data-figma="Dashboard">
+    {/* @design-component Sidebar */}
+    <div data-figma="Sidebar" style={{ width: "220px", backgroundColor: "#1A1A38" }}>
+      ...
+    </div>
+  </div>
+);
+```
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+Unannotated children are treated as black boxes and are not validated unless they carry their own annotation.
 
-## For more information
+---
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+## Architecture
 
-**Enjoy!**
+The system is composed of five sequential stages.
+
+### 1. Figma Extraction
+
+On activation, and on every subsequent save where the Figma file has changed, the extension calls the Figma REST API to pull the geometry, colour, and layout data for a targeted page.
+
+- **Endpoint:** `GET /v1/files/:key/nodes`
+- **Scope:** Only the frames declared in the workspace manifest are queried. A `depth=2` pre-flight retrieves page and top-level frame IDs; a second targeted request retrieves the full node tree.
+- **Output:** A `DESIGN_REF.json` file written to the workspace root, containing CSS-translated style properties keyed by component name.
+
+The extraction pipeline handles component variants, design token resolution (via `boundVariables`), and style library references. Layout properties from Figma's Auto Layout system (`layoutMode`, `itemSpacing`, `paddingTop`, etc.) are mapped to their CSS equivalents (`flexDirection`, `gap`, `padding`, etc.) via `mapFigmaToCss`. A cooldown of 60 seconds prevents excessive API calls on rapid saves.
+
+### 2. The Token Manifest
+
+The extracted data is normalised into a flat, queryable registry, `DESIGN_REF.json`, that lives at the workspace root and is regenerated whenever the upstream Figma file changes.
+
+```json
+{
+  "extractedAt": "2025-01-01T00:00:00.000Z",
+  "nodes": {
+    "Dashboard": {
+      "id": "14:205",
+      "width": "1100px",
+      "height": "780px",
+      "display": "flex",
+      "flexDirection": "row",
+      "children": {
+        "Sidebar": {
+          "width": "220px",
+          "height": "780px",
+          "backgroundColor": "#1A1A38"
+        },
+        "StatBlock": {
+          "width": "198px",
+          "height": "77px",
+          "backgroundColor": "#FFFFFF",
+          "borderRadius": "12px",
+          "padding": "20px 24px"
+        }
+      }
+    }
+  },
+  "generatedCss": {
+    "Dashboard": "/* Dashboard.figma.css, auto-generated by vlint */"
+  },
+  "typographyCss": "/* typography.figma.css, auto-generated by vlint */"
+}
+```
+
+The manifest is the single shared artefact that decouples the Figma API call from the per-save validation pass. It should be committed to version control so the team shares a consistent snapshot of the design specification.
+
+### 3. CSS Generation
+
+On every save, vlint generates two CSS files from the cached `DESIGN_REF.json` and writes them to a configurable output directory (default: `src/styles/figma/`):
+
+- **`{FrameName}.figma.css`** — layout and visual styles for all non-text nodes, using `[data-figma="ComponentName"]` attribute selectors.
+- **`typography.figma.css`** — font family, size, weight, line height, and colour for all text nodes.
+
+The correct import is automatically injected at the top of the saved component file if not already present:
+
+```ts
+import '@/styles/figma/Dashboard.figma.css';
+```
+
+On first activation, vlint ensures the `@` path alias is configured in both `tsconfig.json` and the bundler config (`vite.config.ts` or `webpack.config.js`), writing the alias if absent.
+
+### 4. The Annotation Layer
+
+The developer marks their JSX with `@design-component` annotations, declaring the relationship between a code block and a named Figma node. The `data-figma` attribute on each element provides the runtime hook for CSS targeting.
+
+vlint's parser, built on Babel Parser with the `jsx` and `typescript` plugins, traverses the AST of every saved `.jsx` or `.tsx` file, resolves annotations from both line comments and inline JSX expression containers, and extracts the static style properties from each annotated element's `style` prop.
+
+The parser returns a map of `componentName → StyleProp[]`, where each `StyleProp` carries the property name, the literal value found in the code, and its source location.
+
+### 5. The Validation and Auto-Fix Engine
+
+On every `.jsx` / `.tsx` save, the extension:
+
+1. Looks up the `@design-frame` declaration in the file to identify which root Figma frame to compare against.
+2. Iterates over every annotated component and cross-references its extracted style props against the corresponding node in `DESIGN_REF.json`.
+3. Detects two categories of violation:
+   - **Value mismatch** — the property exists in both code and Figma but the values differ.
+   - **Missing property** — the property exists in the Figma specification but is absent from the code entirely.
+4. Applies a normalisation layer before comparison to handle equivalent representations: `16px === 16`, `bold === 700`, `#FFF === #ffffff === rgba(255,255,255,1)`.
+5. Queues all violations as structured `StyleFix` objects and applies them in a single Babel AST transformation pass, writing the corrected source back to disk via VS Code's `WorkspaceEdit` API.
+
+All findings are reported to a dedicated **vlint** output channel in the VS Code panel.
+
+---
+
+## Workspace Configuration
+
+vlint expects a `design.manifest` file at the workspace root with the following keys:
+
+```ini
+# Figma Personal Access Token
+FIGMA_PAT = your_personal_access_token
+
+# Figma file key (from the URL: figma.com/file/<KEY>/...)
+FIGMA_FKEY = your_file_key
+
+# Name of the Figma page to target
+FIGMA_DEV_PAGE = Development
+
+# Optional: output directory for generated CSS files (default: src/styles/figma)
+FIGMA_STYLES_DIR = src/styles/figma
+```
+
+The manifest is re-parsed automatically whenever it is saved, so credentials and targets can be updated without reloading the extension.
+
+---
+
+## Annotation Schema
+
+| Annotation | Placement | Purpose |
+|---|---|---|
+| `@design-frame <FrameName>` | File-level comment | Declares which root Figma frame this file maps to |
+| `@design-component <NodeName>` | Leading comment or inline JSX comment on a JSX element | Declares that the annotated element implements the named Figma node |
+
+### File-level example
+
+```tsx
+import '@/styles/figma/Dashboard.figma.css';
+// @design-frame Dashboard
+
+// @design-component Dashboard
+export const Dashboard = () => (
+  <div data-figma="Dashboard">
+    {/* @design-component Sidebar */}
+    <div data-figma="Sidebar">
+      {/* @design-component NavItem */}
+      <div data-figma="NavItem">Overview</div>
+    </div>
+
+    {/* @design-component StatBlock */}
+    <div data-figma="StatBlock">
+      <span data-figma="StatLabel">Total Users</span>
+      <span data-figma="StatValue">1,240</span>
+    </div>
+  </div>
+);
+```
+
+Unannotated descendants are ignored by the linter. The `data-figma` attribute doubles as both the CSS selector target and the Figma node lookup key. Annotations are opt-in — developers explicitly declare which boundaries they want enforced.
+
+---
+
+## Package Structure
+
+```
+packages/
+├── core/                  # Shared logic, published as @vlint/core
+│   ├── extraction.js      # Figma REST API client, CSS mapping, and CSS generation
+│   ├── parser.ts          # Babel AST annotation extractor and style fixer
+│   └── index.ts           # Type definitions and public exports
+└── extension/             # VS Code extension host
+    └── extension.ts       # Activation, manifest parsing, save hook, diff engine
+```
+
+---
+
+## How the Auto-Fix Works
+
+When a violation is detected, vlint does not just report it, it corrects the source file directly.
+
+The fix pipeline uses Babel's `traverse` and `generate` APIs to perform a targeted AST mutation:
+
+- For **value mismatches**, the existing `ObjectProperty` node in the `style` expression is updated in place.
+- For **missing properties**, a new `ObjectProperty` is constructed and appended to the existing `ObjectExpression`.
+- When the `style` prop is **empty** (`style={{}}`) or **absent entirely**, the object is populated or the attribute is created from scratch and attached to the `JSXOpeningElement`.
+- For **type violations** (e.g. `backgroundColor` on a `TEXT` node), the property is replaced with the correct equivalent (`color`).
+
+The transformed AST is then regenerated into source code and written back to the file via a `WorkspaceEdit`, replacing the full document range atomically. The file is then saved programmatically to persist the changes to disk.
+
+---
+
+## Output
+
+All linter output is written to the **vlint** output channel in VS Code:
+
+```
+[vlint] Fetching latest styles from Figma...
+[vlint] DESIGN_REF.json updated.
+[vlint] Written src/styles/figma/Dashboard.figma.css
+[vlint] Written src/styles/figma/typography.figma.css
+✓ Sidebar matches Figma spec.
+✓ StatBlock matches Figma spec.
+
+[vlint] Mismatches detected:
+  Style Mismatch in "NavItem": borderRadius — Code: 0, Figma: 8px
+  Missing in code — "StatLabel.color": Figma has #999999
+
+[vlint] Applying 2 fix(es)...
+[vlint] ✓ Source updated. Saving...
+```
+
+---
