@@ -1,0 +1,37 @@
+{
+  "name": "@vlint/cli",
+  "version": "0.1.0",
+  "description": "Headless vlint: check React sources against a Figma design contract from CI or an agent loop",
+  "license": "ISC",
+  "author": "Edward Ng",
+  "type": "commonjs",
+  "bin": {
+    "vlint": "bin/vlint.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "figma",
+    "lint",
+    "ci",
+    "design-to-code"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ehng359/vlint",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@vlint/core": "^0.1.0"
+  }
+}

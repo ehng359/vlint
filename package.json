@@ -1,8 +1,7 @@
 {
-  "name": "capstone",
+  "name": "vlint-workspace",
   "version": "1.0.0",
-  "description": "",
-  "main": "extraction.js",
+  "private": true,
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
@@ -16,7 +15,6 @@
     "dotenv": "^17.4.2",
     "esbuild": "^0.28.0"
   },
-  "publisher": "EdwardNg",
   "devDependencies": {
     "@babel/parser": "^7.29.3",
     "@babel/traverse": "^7.29.0",
@@ -26,6 +24,8 @@
   },
   "workspaces": [
     "packages/core",
+    "packages/cli",
+    "packages/mcp",
     "packages/extension"
   ]
 }

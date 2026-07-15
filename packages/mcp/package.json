@@ -1,0 +1,38 @@
+{
+  "name": "@vlint/mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing the vlint design contract to coding agents",
+  "license": "ISC",
+  "author": "Edward Ng",
+  "type": "commonjs",
+  "bin": {
+    "vlint-mcp": "bin/vlint-mcp.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "figma",
+    "mcp",
+    "agents",
+    "design-to-code"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ehng359/vlint",
+    "directory": "packages/mcp"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@vlint/core": "^0.1.0"
+  }
+}
