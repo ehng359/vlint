@@ -7,8 +7,8 @@ REPO_ROOT=$(pwd)
 npm run build --workspace=packages/core
 
 # 2. Inject core into extension's local node_modules
-mkdir -p packages/extension/node_modules/@vlint/core
-cp -r packages/core/dist/* packages/extension/node_modules/@vlint/core/
+mkdir -p packages/extension/node_modules/@vlint/core/dist
+cp -r packages/core/dist/. packages/extension/node_modules/@vlint/core/dist/
 cp packages/core/package.json packages/extension/node_modules/@vlint/core/
 
 # 3. Install Babel locally in extension

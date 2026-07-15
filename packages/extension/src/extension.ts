@@ -1,122 +1,187 @@
-import { extractDataFigmaNames, FigmaPage, hasFileBeenUpdated, queryFigmaStyles } from '@vlint/core';
+import {
+	applyStyleFixes, extractDataFigmaNames, FigmaPage, FrameSpec, getFileMeta,
+	lintSource, loadCssModules, parseManifest, queryFigmaStyles, setLogger,
+	StyleFix, Violation, violationMessage, violationToStyleFix
+} from '@vlint/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-// ─── Manifest Parser ──────────────────────────────────────────────────────────
-// Reads key=value pairs from design.manifest, ignoring blank lines and comments.
-// Called on activation and again whenever design.manifest is saved.
-function parseManifest(filePath: string): Record<string, string> {
-	const content = fs.readFileSync(filePath, 'utf-8');
-	return Object.fromEntries(
-		content
-			.split('\n')
-			.filter(line => line.trim() && !line.startsWith('#'))
-			.map(line => line.split('=').map(s => s.trim()))
-	);
-}
+const PAT_SECRET_KEY = 'vlint.figmaPat';
 
-// ─── Value Normalisation ──────────────────────────────────────────────────────
-// Ensures equivalent values in different formats compare as equal.
-// e.g. "16px" === 16, "#FFF" === "#ffffff", "Bold" === 700
-function normaliseValue(value: string | number): string {
-	const str = String(value).trim();
-
-	// Strip px and compare as numbers: "16px" === 16
-	if (/^-?\d+(\.\d+)?px$/.test(str)) {
-		return parseFloat(str).toString();
+// tsconfig.json is JSONC in most real projects; a parse failure must never
+// crash activation, and never trigger a rewrite that would strip comments.
+function readJsonConfig(filePath: string): any | null {
+	try {
+		return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+	} catch {
+		return null;
 	}
-
-	// Normalise font weight keywords to numbers
-	const fontWeightMap: Record<string, string> = {
-		thin: "100", extralight: "200", light: "300", regular: "400",
-		normal: "400", medium: "500", semibold: "600", bold: "700",
-		extrabold: "800", black: "900"
-	};
-	if (fontWeightMap[str.toLowerCase()]) {
-		return fontWeightMap[str.toLowerCase()];
-	}
-
-	// Normalise hex colors to lowercase #rrggbb (handles #FFF -> #ffffff)
-	const hex6 = str.match(/^#([0-9a-f]{6})$/i);
-	if (hex6) return "#" + hex6[1].toLowerCase();
-
-	const hex3 = str.match(/^#([0-9a-f]{3})$/i);
-	if (hex3) {
-		const [r, g, b] = hex3[1].split("");
-		return "#" + r + r + g + g + b + b;
-	}
-
-	// Normalise rgba(255, 255, 255, 1) -> #ffffff
-	const rgba = str.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
-	if (rgba) {
-		const a = rgba[4] !== undefined ? parseFloat(rgba[4]) : 1;
-		if (a === 1) {
-			return "#" + [rgba[1], rgba[2], rgba[3]]
-				.map(n => parseInt(n).toString(16).padStart(2, "0"))
-				.join("");
-		}
-		return `rgba(${rgba[1]}, ${rgba[2]}, ${rgba[3]}, ${a})`;
-	}
-
-	return str.toLowerCase();
 }
 
 function hasAliasConfigured(workspaceRoot: string): boolean {
-	const tsconfig = path.join(workspaceRoot, 'tsconfig.json');
-	if (!fs.existsSync(tsconfig)) return false;
-	const content = JSON.parse(fs.readFileSync(tsconfig, 'utf-8'));
-	return !!content?.compilerOptions?.paths?.['@/*'];
+	const tsconfigPath = path.join(workspaceRoot, 'tsconfig.json');
+	if (!fs.existsSync(tsconfigPath)) return false;
+	const tsconfig = readJsonConfig(tsconfigPath);
+	if (tsconfig === null) return true; // unparseable: assume configured, do not touch
+	return !!tsconfig?.compilerOptions?.paths?.['@/*'];
+}
+
+// The '@' alias maps to src/, so only dirs under src/ get an alias import.
+function importSpecifierFor(figmaStylesDir: string): string {
+	return figmaStylesDir.startsWith('src/') ? '@/' + figmaStylesDir.slice(4) : figmaStylesDir;
+}
+
+function toDiagnostic(document: vscode.TextDocument, v: Violation): vscode.Diagnostic {
+	const line = v.loc ? Math.max(0, v.loc.line - 1) : 0;
+	const range = v.loc
+		? new vscode.Range(line, v.loc.column, line, v.loc.column + Math.max(v.property.length, 1))
+		: document.lineAt(0).range;
+
+	const diagnostic = new vscode.Diagnostic(
+		range,
+		violationMessage(v),
+		v.severity === 'error' ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning
+	);
+	diagnostic.source = 'vlint';
+	diagnostic.code = v.kind;
+	return diagnostic;
 }
 
 // ─── Activation ───────────────────────────────────────────────────────────────
-// Called once when the extension is first activated (i.e. on first .tsx save).
 export function activate(context: vscode.ExtensionContext) {
 	console.log('[vlint] Extension activated.');
 
-	const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri.fsPath;
-	const manifestPath = path.join(workspaceRoot!, "design.manifest");
-	const designRefPath = path.join(workspaceRoot!, "DESIGN_REF.json");
+	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!workspaceRoot) {
+		console.log('[vlint] No workspace folder open, nothing to lint.');
+		return;
+	}
+	const manifestPath = path.join(workspaceRoot, "design.manifest");
+	const designRefPath = path.join(workspaceRoot, "DESIGN_REF.json");
 
 	let manifest = parseManifest(manifestPath);
 
-	// designRefContent is the parsed DESIGN_REF.json held in memory.
-	// It is loaded from disk on activation, then kept fresh by the save handler.
-	let designRefContent: FigmaPage;
+	const outputChannel = vscode.window.createOutputChannel('vlint');
+	outputChannel.show();
+	setLogger({
+		log: (m) => outputChannel.appendLine(m),
+		warn: (m) => outputChannel.appendLine(m),
+		error: (m) => outputChannel.appendLine(m),
+	});
 
-	// init forces a Figma fetch on the very first save after activation,
-	// even if the cooldown hasn't elapsed.
-	let init = true
+	const diagnostics = vscode.languages.createDiagnosticCollection('vlint');
+	context.subscriptions.push(outputChannel, diagnostics);
+
+	// Violations from the last lint of each document. The code action provider
+	// reads from here: VS Code strips custom properties off Diagnostic objects
+	// on their way through the marker store, so they cannot carry fix payloads.
+	const violationsByUri = new Map<string, Violation[]>();
+
+	context.subscriptions.push(
+		vscode.languages.registerCodeActionsProvider(
+			[{ language: 'typescriptreact' }, { language: 'javascriptreact' }],
+			{
+				provideCodeActions(document, range): vscode.CodeAction[] {
+					const violations = violationsByUri.get(document.uri.toString()) ?? [];
+					const actions: vscode.CodeAction[] = [];
+					for (const v of violations) {
+						const fix = violationToStyleFix(v);
+						if (!fix) continue;
+						const line = v.loc ? Math.max(0, v.loc.line - 1) : 0;
+						if (range.start.line > line || range.end.line < line) continue;
+
+						const action = new vscode.CodeAction(
+							`Apply Figma value: ${fix.propName} = ${JSON.stringify(fix.figmaValue)}`,
+							vscode.CodeActionKind.QuickFix
+						);
+						// The rewrite is computed when the action is invoked, against
+						// the document's text at that moment, never against a snapshot
+						action.command = {
+							command: 'vlint.applyFix',
+							title: action.title,
+							arguments: [document.uri, fix],
+						};
+						actions.push(action);
+					}
+					return actions;
+				},
+			},
+			{ providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }
+		)
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('vlint.applyFix', async (uri: vscode.Uri, fix: StyleFix) => {
+			const document = await vscode.workspace.openTextDocument(uri);
+			const current = document.getText();
+			const fixed = applyStyleFixes(current, [fix]);
+			if (fixed === current) return;
+			const edit = new vscode.WorkspaceEdit();
+			edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(current.length)), fixed);
+			await vscode.workspace.applyEdit(edit);
+		})
+	);
+
+	// ─── PAT handling ─────────────────────────────────────────────────────────
+	async function getPat(): Promise<string | undefined> {
+		return (await context.secrets.get(PAT_SECRET_KEY)) || manifest["FIGMA_PAT"] || undefined;
+	}
+
+	async function migratePatToSecrets(): Promise<void> {
+		if (!manifest["FIGMA_PAT"]) return;
+		const stored = await context.secrets.get(PAT_SECRET_KEY);
+		if (stored) return;
+		await context.secrets.store(PAT_SECRET_KEY, manifest["FIGMA_PAT"]);
+		outputChannel.appendLine('[vlint] FIGMA_PAT copied into VS Code secret storage. The CLI still reads it from design.manifest, so keep it there (gitignored) if you use `vlint` headless; otherwise it can be removed.');
+	}
+	void migratePatToSecrets();
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('vlint.setFigmaPat', async () => {
+			const pat = await vscode.window.showInputBox({
+				prompt: 'Figma Personal Access Token',
+				password: true,
+				ignoreFocusOut: true,
+			});
+			if (pat) {
+				await context.secrets.store(PAT_SECRET_KEY, pat);
+				vscode.window.showInformationMessage('vlint: Figma token stored securely.');
+			}
+		})
+	);
+
+	// designRefContent is the parsed DESIGN_REF.json held in memory. Its
+	// stamped lastModified is the freshness baseline; there is no separate
+	// init flag or module-level timestamp to keep in sync.
+	let designRefContent: FigmaPage | undefined;
 	if (fs.existsSync(designRefPath)) {
-		const parsed = JSON.parse(fs.readFileSync(designRefPath).toString());
-		if (!parsed.generatedCss) {
-			console.log('[vlint] DESIGN_REF.json is stale — will re-fetch on next save.');
-		} else {
-			designRefContent = parsed;
+		try {
+			const parsed = JSON.parse(fs.readFileSync(designRefPath).toString());
+			if (parsed.generatedCss) designRefContent = parsed;
+		} catch {
+			outputChannel.appendLine('[vlint] DESIGN_REF.json is unreadable, will re-fetch on next save.');
 		}
-	} else {
-		// File doesn't exist — force a fetch on next save
-		init = true;
 	}
 
 	// Cooldown prevents hammering the Figma API on every keystroke-save.
-	// The metadata check (hasFileBeenUpdated) runs at most once per minute.
 	let lastCheckedAt = 0;
 	const CHECK_COOLDOWN_MS = 5_000;
-
-	const outputChannel = vscode.window.createOutputChannel('vlint');
-	outputChannel.show();
 
 	function ensureAliasConfigured(workspaceRoot: string): void {
 		const tsconfigPath = path.join(workspaceRoot, 'tsconfig.json');
 		if (fs.existsSync(tsconfigPath)) {
-			const tsconfig = JSON.parse(fs.readFileSync(tsconfigPath, 'utf-8'));
-			tsconfig.compilerOptions ??= {};
-			tsconfig.compilerOptions.paths ??= {};
-			if (!tsconfig.compilerOptions.paths['@/*']) {
-				tsconfig.compilerOptions.paths['@/*'] = ['./src/*'];
-				fs.writeFileSync(tsconfigPath, JSON.stringify(tsconfig, null, 2));
-				outputChannel.appendLine('[vlint] ✓ Added @ alias to tsconfig.json');
+			const tsconfig = readJsonConfig(tsconfigPath);
+			if (tsconfig === null) {
+				outputChannel.appendLine('[vlint] ⚠ tsconfig.json has comments or is unparseable; add the @ alias to compilerOptions.paths manually: "@/*": ["./src/*"]');
+			} else {
+				tsconfig.compilerOptions ??= {};
+				tsconfig.compilerOptions.paths ??= {};
+				if (!tsconfig.compilerOptions.paths['@/*']) {
+					tsconfig.compilerOptions.paths['@/*'] = ['./src/*'];
+					fs.writeFileSync(tsconfigPath, JSON.stringify(tsconfig, null, 2));
+					outputChannel.appendLine('[vlint] ✓ Added @ alias to tsconfig.json');
+				}
 			}
 		}
 
@@ -124,39 +189,35 @@ export function activate(context: vscode.ExtensionContext) {
 		if (fs.existsSync(viteConfigPath)) {
 			let content = fs.readFileSync(viteConfigPath, 'utf-8');
 			if (!content.includes("'@'") && !content.includes('"@"')) {
-				content = content.replace(
+				const patched = content.replace(
 					'defineConfig({',
 					`defineConfig({\n  resolve: { alias: { '@': path.resolve(__dirname, 'src') } },`
 				);
-				if (!content.includes("import path")) {
-					content = `import path from 'path';\n` + content;
+				if (patched === content) {
+					outputChannel.appendLine("[vlint] ⚠ Could not patch vite.config.ts automatically; add resolve.alias['@'] = path.resolve(__dirname, 'src') manually.");
+				} else {
+					content = patched;
+					if (!content.includes("import path")) {
+						content = `import path from 'path';\n` + content;
+					}
+					fs.writeFileSync(viteConfigPath, content);
+					outputChannel.appendLine('[vlint] ✓ Added @ alias to vite.config.ts');
 				}
-				fs.writeFileSync(viteConfigPath, content);
-				outputChannel.appendLine('[vlint] ✓ Added @ alias to vite.config.ts');
 			}
 		}
 	}
 
-	if (!hasAliasConfigured(workspaceRoot!)) {
+	if (!hasAliasConfigured(workspaceRoot)) {
 		outputChannel.appendLine('[vlint] ⚠ No @ alias found in vite/webpack config. CSS imports may fail to resolve.');
-		ensureAliasConfigured(workspaceRoot!);
+		ensureAliasConfigured(workspaceRoot);
 	}
 
 	// ─── Save Handler ─────────────────────────────────────────────────────────
-	// Runs on every document save. Orchestration order matters — see step comments.
 	vscode.workspace.onDidSaveTextDocument(async (document: vscode.TextDocument) => {
-		if (!fs.existsSync(designRefPath)) {
-			init = true;
-		}
-
-		if (!fs.existsSync(manifestPath)) {
-			outputChannel.appendLine('[vlint] No design.manifest found. Create one at the worksapce root to get started.')
-			outputChannel.appendLine('[vlint] Required keys: FIGMA_PAT, FIGMA_FKEY, FIGMA_DEV_PAGE, FIGMA_STYLES_DIR')
-		}
 		// ── Step 0: Filter irrelevant files ──────────────────────────────────
-		// Re-parse the manifest when it changes so new tokens/keys take effect
-		// without needing to reload the window.
-		if (document.fileName === "design.manifest") {
+		// Re-parse the manifest when it changes so new keys take effect without
+		// reloading the window.
+		if (path.basename(document.fileName) === "design.manifest") {
 			manifest = parseManifest(manifestPath);
 			return;
 		}
@@ -165,127 +226,145 @@ export function activate(context: vscode.ExtensionContext) {
 		if (lang !== "javascriptreact" && lang !== "typescriptreact") return;
 
 		// ── Step 1: Extract data-figma names from the saved document ─────────
-		// extractDataFigmaNames reads @design-frame for the frame name and
-		// scans all data-figma="X" attributes for component names.
-		// This must happen before any later step that references componentNames.
 		const documentContent = document.getText();
-		const [frameName, componentNames] = extractDataFigmaNames(documentContent);
+		const [frameName] = extractDataFigmaNames(documentContent);
 
 		// ── Step 2: Refresh Figma data if needed ─────────────────────────────
-		// Fetches fresh styles from Figma only when:
-		//   a) This is the first save since activation (init), OR
-		//   b) The cooldown has elapsed AND Figma reports a newer lastModified.
-		// On a cache hit, designRefContent and DESIGN_REF.json stay as-is.
-		// AFTER
+		// Fetch when there is no usable snapshot, or the cooldown elapsed and
+		// Figma's lastModified is newer than the snapshot's stamp. Without a
+		// token everything still runs offline from the cached DESIGN_REF.json.
+		if (!fs.existsSync(designRefPath)) designRefContent = undefined;
+
+		const pat = await getPat();
+		const canFetch = !!(pat && manifest["FIGMA_FKEY"] && manifest["FIGMA_DEV_PAGE"]);
+		let shouldFetch = !designRefContent;
+
 		const now = Date.now();
-		const cooldownElapsed = (now - lastCheckedAt) > CHECK_COOLDOWN_MS;
-
-		let shouldFetch = init;
-
-		if (!init && cooldownElapsed) {
-			// Always advance lastCheckedAt when a check is attempted — prevents
-			// hammering the API on every save once the cooldown elapses
+		if (designRefContent && canFetch && (now - lastCheckedAt) > CHECK_COOLDOWN_MS) {
 			lastCheckedAt = now;
-			const updated = await hasFileBeenUpdated(manifest["FIGMA_FKEY"], manifest["FIGMA_PAT"]);
-			if (updated) shouldFetch = true;
-		}
-
-		if (shouldFetch) {
-			init = false;
-			if (cooldownElapsed || lastCheckedAt === 0) lastCheckedAt = now;
-
-			outputChannel.appendLine('[vlint] Fetching latest styles from Figma...');
-			const figmaStyles = await queryFigmaStyles(
-				manifest["FIGMA_DEV_PAGE"],
-				manifest["FIGMA_FKEY"],
-				manifest["FIGMA_PAT"]
-			) as FigmaPage;
-
-			designRefContent = figmaStyles;
-
-			const refUri = vscode.Uri.joinPath(
-				vscode.workspace.workspaceFolders![0].uri,
-				'DESIGN_REF.json'
-			);
-			await vscode.workspace.fs.writeFile(
-				refUri,
-				Buffer.from(JSON.stringify(figmaStyles, null, 2), 'utf8')
-			);
-			outputChannel.appendLine('[vlint] DESIGN_REF.json updated.');
-		}
-
-		// ── Step 3: Write CSS files ───────────────────────────────────────────
-		// Runs on every save using the cached designRefContent.
-		// All generated CSS lives under src/styles/figma/ (configurable via
-		// FIGMA_STYLES_DIR in design.manifest) so imports are always predictable.
-		//
-		// Two files are written:
-		//   {FrameName}.figma.css  — layout + visual styles, @layer figma
-		//   typography.figma.css   — text styles, @layer figma.typography
-		//
-		// Both layers sit below unlayered CSS, so developer overrides always win.
-		if (designRefContent) {
-			const figmaStylesDir = manifest["FIGMA_STYLES_DIR"] || 'src/styles/figma';
-			const figmaStylesUri = vscode.Uri.joinPath(
-				vscode.workspace.workspaceFolders![0].uri,
-				...figmaStylesDir.split('/')
-			);
-
-			for (const [frame, css] of Object.entries(designRefContent.generatedCss || {})) {
-				if (!css) continue;
-				const cssUri = vscode.Uri.joinPath(figmaStylesUri, `${frame}.figma.css`);
-				await vscode.workspace.fs.writeFile(cssUri, Buffer.from(css as string, 'utf8'));
-				outputChannel.appendLine(`[vlint] Written ${figmaStylesDir}/${frame}.figma.css`);
+			try {
+				const live = await getFileMeta(manifest["FIGMA_FKEY"], pat!);
+				const stamped = designRefContent.lastModified;
+				if (!stamped || new Date(live.lastModified) > new Date(stamped)) shouldFetch = true;
+			} catch (err) {
+				outputChannel.appendLine(`[vlint] Update check skipped: ${(err as Error).message}`);
 			}
 		}
 
-		// ── Step 4: Guard against missing frame ───────────────────────────────
-		// If the @design-frame annotation doesn't match any frame in DESIGN_REF.json,
-		// there's nothing to compare against — bail early with a clear error.
-		const frameContent = designRefContent?.nodes[frameName];
-		if (!frameContent) {
-			outputChannel.appendLine(`[Error] Frame "${frameName}" not found in DESIGN_REF.json`);
+		let fetchedThisSave = false;
+		if (shouldFetch && canFetch) {
+			lastCheckedAt = now;
+			outputChannel.appendLine('[vlint] Fetching latest styles from Figma...');
+			try {
+				designRefContent = await queryFigmaStyles(
+					manifest["FIGMA_DEV_PAGE"], manifest["FIGMA_FKEY"], pat!
+				) as FigmaPage;
+				fetchedThisSave = true;
+			} catch (err) {
+				outputChannel.appendLine(`[vlint] ✗ ${(err as Error).message}`);
+			}
+
+			if (fetchedThisSave) {
+				const refUri = vscode.Uri.joinPath(
+					vscode.workspace.workspaceFolders![0].uri, 'DESIGN_REF.json'
+				);
+				await vscode.workspace.fs.writeFile(
+					refUri, Buffer.from(JSON.stringify(designRefContent, null, 2), 'utf8')
+				);
+				outputChannel.appendLine('[vlint] DESIGN_REF.json updated.');
+			}
+		} else if (shouldFetch && !canFetch) {
+			if (!fs.existsSync(manifestPath)) {
+				outputChannel.appendLine('[vlint] No design.manifest found. Create one at the workspace root to get started.');
+				outputChannel.appendLine('[vlint] Required keys: FIGMA_FKEY, FIGMA_DEV_PAGE, FIGMA_STYLES_DIR (set the token via "vlint: Set Figma Token")');
+			} else {
+				outputChannel.appendLine('[vlint] No Figma token and no cached DESIGN_REF.json. Run "vlint: Set Figma Token" or commit a snapshot.');
+			}
+		}
+
+		if (!designRefContent) {
+			diagnostics.delete(document.uri);
+			violationsByUri.delete(document.uri.toString());
 			return;
 		}
 
-		// ── Step 5: Mismatch reporting ────────────────────────────────────────
-		// Cross-references every data-figma name in the document against
-		// the Figma frame. Reports components that exist in code but are
-		// absent from the Figma spec — likely a rename or deletion upstream.
-		// No source edits happen here; this is read-only reporting.
-		const mismatches: string[] = [];
-
-		for (const componentName of componentNames) {
-			const figmaElement = frameContent.children[componentName];
-
-			if (!figmaElement) {
-				mismatches.push(
-					`[Warn] "${componentName}" has data-figma attribute but no match in Figma frame.`
-				);
-				continue;
-			}
-
-			outputChannel.appendLine(`✓ ${componentName} found in Figma spec.`);
-		}
-
-		if (mismatches.length > 0) {
-			outputChannel.appendLine("\n[vlint] Mismatches detected:");
-			mismatches.forEach(m => outputChannel.appendLine(m));
-		}
-
-		// ── Step 6: Inject CSS import ─────────────────────────────────────────
-		// Adds the frame's .figma.css import to the top of the file if absent.
-		// Uses the @/ alias so the path is stable regardless of where the
-		// component lives in the directory tree.
-		// Only writes if the import is genuinely missing to avoid save loops.
+		// ── Step 3: Write CSS files ───────────────────────────────────────────
+		// Only after a fresh fetch, or when a file is missing on disk; a plain
+		// re-save must not rewrite identical CSS and churn the dev server.
 		const figmaStylesDir = manifest["FIGMA_STYLES_DIR"] || 'src/styles/figma';
-		const cssImportLine = `import '@/styles/figma/${frameName}.figma.css';`;
-		const alreadyImported = documentContent.includes(`styles/figma/${frameName}.figma.css`);
-
 		const figmaStylesUri = vscode.Uri.joinPath(
 			vscode.workspace.workspaceFolders![0].uri,
 			...figmaStylesDir.split('/')
 		);
+
+		for (const [frame, css] of Object.entries(designRefContent.generatedCss || {})) {
+			if (!css) continue;
+			const cssUri = vscode.Uri.joinPath(figmaStylesUri, `${frame}.figma.css`);
+			const exists = await vscode.workspace.fs.stat(cssUri).then(() => true, () => false);
+			if (!fetchedThisSave && exists) continue;
+			await vscode.workspace.fs.writeFile(cssUri, Buffer.from(css as string, 'utf8'));
+			outputChannel.appendLine(`[vlint] Written ${figmaStylesDir}/${frame}.figma.css`);
+		}
+
+		// ── Step 4: Guard against missing frame ───────────────────────────────
+		const frameContent = designRefContent.nodes[frameName];
+		if (!frameContent) {
+			outputChannel.appendLine(`[Error] Frame "${frameName}" not found in DESIGN_REF.json`);
+			diagnostics.delete(document.uri);
+			violationsByUri.delete(document.uri.toString());
+			return;
+		}
+
+		// ── Step 5: Validate against the design contract ─────────────────────
+		const violations = lintSource(
+			documentContent, frameName,
+			frameContent as unknown as FrameSpec,
+			designRefContent.nodes as unknown as Record<string, FrameSpec>,
+			loadCssModules(document.fileName, documentContent)
+		);
+
+		if (violations.length > 0) {
+			outputChannel.appendLine('\n[vlint] Violations detected:');
+			violations.forEach(v => outputChannel.appendLine(`  [${v.severity}] ${violationMessage(v)}`));
+		} else {
+			outputChannel.appendLine(`✓ ${path.basename(document.fileName)} matches frame "${frameName}".`);
+		}
+
+		violationsByUri.set(document.uri.toString(), violations);
+		diagnostics.set(document.uri, violations.map(v => toDiagnostic(document, v)));
+
+		// ── Step 6: Auto-fix (opt-in) ─────────────────────────────────────────
+		const autoFix = vscode.workspace.getConfiguration('vlint').get<boolean>('autoFix', false);
+		const fixable = violations
+			.map(violationToStyleFix)
+			.filter((f): f is StyleFix => f !== null);
+
+		if (autoFix && fixable.length > 0) {
+			const fixedSource = applyStyleFixes(documentContent, fixable);
+			if (fixedSource !== documentContent) {
+				outputChannel.appendLine(`[vlint] Applying ${fixable.length} fix(es)...`);
+				const edit = new vscode.WorkspaceEdit();
+				edit.replace(
+					document.uri,
+					new vscode.Range(document.positionAt(0), document.positionAt(documentContent.length)),
+					fixedSource
+				);
+				if (await vscode.workspace.applyEdit(edit)) {
+					outputChannel.appendLine('[vlint] ✓ Source updated. Saving...');
+					await document.save();
+					return; // the re-save re-lints and refreshes diagnostics
+				}
+				outputChannel.appendLine('[vlint] ✗ Failed to apply fixes.');
+			}
+		}
+
+		// ── Step 7: Inject CSS import ─────────────────────────────────────────
+		// The import path must track FIGMA_STYLES_DIR, the same place Step 3
+		// writes to. Only writes if the import is genuinely missing.
+		const importSpecifier = importSpecifierFor(figmaStylesDir);
+		const cssImportLine = `import '${importSpecifier}/${frameName}.figma.css';`;
+		const alreadyImported = documentContent.includes(`${importSpecifier}/${frameName}.figma.css`);
+
 		const cssUri = vscode.Uri.joinPath(figmaStylesUri, `${frameName}.figma.css`);
 		const cssFileExists = await vscode.workspace.fs.stat(cssUri).then(() => true, () => false);
 
@@ -312,5 +391,5 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 // ─── Deactivation ─────────────────────────────────────────────────────────────
-// Nothing to clean up currently — VSCode disposes the save listener automatically.
+// Nothing to clean up currently, subscriptions are disposed by VSCode.
 export function deactivate() { }

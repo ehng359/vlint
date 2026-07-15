@@ -2,7 +2,7 @@
   "name": "vlint",
   "displayName": "vlint - Figma-based Visual Linter",
   "description": "Automatic visual linter for design-to-development workflows.",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "engines": {
     "vscode": "^1.118.0"
   },
@@ -17,14 +17,20 @@
   "contributes": {
     "commands": [
       {
-        "command": "vlint.helloWorld",
-        "title": "Hello World"
-      },
-      {
-        "command": "vlint.save",
-        "title": "Vlint: Save and Check Design"
+        "command": "vlint.setFigmaPat",
+        "title": "vlint: Set Figma Token"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "vlint",
+      "properties": {
+        "vlint.autoFix": {
+          "type": "boolean",
+          "default": false,
+          "description": "Rewrite annotated inline styles to match the Figma spec on save. Off by default; violations always appear as diagnostics with quick fixes."
+        }
+      }
+    }
   },
   "publisher": "EdwardNg",
   "repository": {
