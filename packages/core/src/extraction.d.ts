@@ -13,9 +13,15 @@ export function hasFileBeenUpdated(
 
 export function generateLayoutCss(
     frameName: string,
-    childrenMap: Record<string, any>
+    childrenMap: Record<string, any>,
+    breakpointFrames?: Record<string, Record<string, any>>
 ): string;
 
-export function generateTypographyCss(
-    registry: Record<string, any>
-): string;
+export function mapFigmaToCss(node: Record<string, any>): Record<string, any>;
+
+export function getFileMeta(
+    fileKey: string,
+    accessToken: string
+): Promise<{ version: string; lastModified: string }>;
+
+export const SPEC_METADATA_KEYS: Set<string>;

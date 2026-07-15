@@ -1,0 +1,21 @@
+{
+  "name": "vlint-fixture",
+  "lastModified": "2026-06-08T23:15:40Z",
+  "version": "1234567890",
+  "document": {
+    "id": "0:0",
+    "name": "Document",
+    "type": "DOCUMENT",
+    "children": [
+      {
+        "id": "0:1",
+        "name": "dev",
+        "type": "CANVAS",
+        "children": [
+          { "id": "285:30", "name": "Dashboard", "type": "FRAME" },
+          { "id": "285:60", "name": "Dashboard@md", "type": "FRAME" }
+        ]
+      }
+    ]
+  }
+}
