@@ -1,18 +1,46 @@
 {
   "name": "@vlint/core",
-  "version": "1.0.0",
-  "description": "",
-  "main": "src/index.ts",
+  "version": "0.1.0",
+  "description": "Figma extraction, CSS generation, and design-contract validation engine for vlint",
+  "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test test/*.test.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "figma",
+    "design-tokens",
+    "lint",
+    "tailwind",
+    "design-to-code"
+  ],
+  "author": "Edward Ng",
   "license": "ISC",
   "type": "commonjs",
-  "devDependencies": {
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ehng359/vlint",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
     "@babel/generator": "^7.29.7",
-    "@types/babel__generator": "^7.27.0"
+    "@babel/parser": "^7.29.7",
+    "@babel/traverse": "^7.29.7",
+    "@babel/types": "^7.29.7"
+  },
+  "devDependencies": {
+    "@types/babel__generator": "^7.27.0",
+    "@types/babel__traverse": "^7.28.0"
   }
 }

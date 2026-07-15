@@ -1,5 +1,19 @@
-import { hasFileBeenUpdated, queryFigmaStyles } from './extraction';
-import { applyStyleFixes, extractDataFigmaNames, StyleFix } from "./parser";
+import { generateLayoutCss, getFileMeta, hasFileBeenUpdated, queryFigmaStyles } from './extraction';
+import { getLogger, Logger, setLogger } from './logger';
+import { parseManifest } from './manifest';
+import {
+    applyClassFixes, applyStyleFixes, ClassFix, extractDataFigmaNames,
+    extractStyleProps, getDesignAnnotation, getDesignOverrides, StyleFix, StyleProp
+} from "./parser";
+import { figmaValueToUtility } from './tailwind';
+import {
+    FrameSpec, lintSource, normaliseValue, SpecNode,
+    tokenToCssVarName, Violation, ViolationKind,
+    violationMessage, violationToClassFix, violationToStyleFix
+} from './validate';
+import { parseCssModuleClasses } from './cssmodules';
+import { ResolvedUtilities, resolveTailwindClasses } from './tailwind';
+import { checkFile, CheckResult, checkSource, getFrameSpec, listFrames, loadCssModules, loadDesignRef } from './workspace';
 
 interface FigmaColor {
     r: number;
@@ -98,6 +112,11 @@ interface FigmaElement {
         componentSet?: Record<string, any>;
         styles?: Record<string, any>;
     };
+    // Per-CSS-prop design token bindings (variable name, or raw id when the
+    // Variables API is unreadable)
+    tokens?: Record<string, string>;
+    // Published style references by kind, e.g. { fill: "Primary/500" }
+    styleRefs?: Record<string, string>;
 }
 
 interface FigmaFrame {
@@ -115,6 +134,11 @@ interface FigmaFrame {
 
 interface FigmaPage {
     extractedAt: string;
+    // Figma file version + timestamp at extraction time, for drift direction
+    version?: string;
+    lastModified?: string;
+    // Variable id -> name map when the Variables API was readable
+    variables?: Record<string, string>;
     nodes: {
         [frameName: string]: FigmaFrame;
     };
@@ -125,15 +149,43 @@ interface FigmaPage {
 }
 
 export {
-    applyStyleFixes, extractDataFigmaNames, FigmaColor,
+    applyClassFixes, applyStyleFixes, checkFile, CheckResult, ClassFix,
+    checkSource, extractDataFigmaNames, extractStyleProps, FigmaColor,
     FigmaElement,
     FigmaFrame,
     FigmaPage,
     FigmaPaint,
     FigmaTextDetails,
     FigmaVisuals,
+    FrameSpec,
+    figmaValueToUtility,
+    generateLayoutCss,
+    getDesignAnnotation,
+    getDesignOverrides,
+    getFileMeta,
+    getFrameSpec,
+    getLogger,
     hasFileBeenUpdated,
+    lintSource,
+    listFrames,
+    loadCssModules,
+    loadDesignRef,
+    parseCssModuleClasses,
+    Logger,
+    normaliseValue,
+    parseManifest,
     queryFigmaStyles,
-    StyleFix
+    ResolvedUtilities,
+    resolveTailwindClasses,
+    setLogger,
+    SpecNode,
+    StyleFix,
+    StyleProp,
+    tokenToCssVarName,
+    Violation,
+    ViolationKind,
+    violationMessage,
+    violationToClassFix,
+    violationToStyleFix
 };
 
