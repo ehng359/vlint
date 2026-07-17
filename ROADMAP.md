@@ -85,4 +85,4 @@ Done when: the JSON output distinguishes the two failure directions and a consum
 
 4. **Publish.** `npm publish` in core, cli, mcp (core first), `vsce publish` for the extension. Optionally a `release.yml` that publishes on tag once an `NPM_TOKEN` secret exists.
 
-5. **CI integration layer.** A reusable GitHub Action wrapping `vlint extract && vlint check --json`, a PR comment bot rendering violations with breakpoint and token context, and auto-filed issues when the drift probe reports the design moved ahead of the snapshot. This is where vlint becomes team infrastructure instead of a personal tool.
+5. **CI integration layer.** Done as of July 2026: the repo doubles as a composite GitHub Action (`uses: ehng359/vlint@main`, root `action.yml`) that installs from the checkout itself, so it works before the npm packages exist. The README documents the PR comment step and the design-moved-ahead issue step as `github-script` templates consumers paste in. A hosted bot with richer rendering remains future work.

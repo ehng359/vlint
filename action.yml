@@ -1,0 +1,46 @@
+name: vlint
+description: Validate React sources against a Figma design contract (DESIGN_REF.json)
+branding:
+  icon: check-square
+  color: purple
+
+inputs:
+  files:
+    description: Files or globs to check, e.g. "src/**/*.tsx"
+    required: true
+  working-directory:
+    description: Directory containing DESIGN_REF.json (and design.manifest for remote probes)
+    required: false
+    default: "."
+  strict:
+    description: Fail on warnings too, not only errors
+    required: false
+    default: "false"
+  remote:
+    description: Probe the live Figma file for drift direction (needs FIGMA_PAT in design.manifest or the manifest keys present)
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install vlint
+      shell: bash
+      run: |
+        cd "${{ github.action_path }}"
+        npm ci --silent
+        npm run build --workspace=packages/core --silent
+
+    - name: vlint check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -o pipefail
+        # globstar needs bash 4+; macOS runners ship 3.2
+        shopt -s globstar 2>/dev/null || true
+        shopt -s nullglob
+        args=(check --json)
+        [ "${{ inputs.strict }}" = "true" ] && args+=(--strict)
+        [ "${{ inputs.remote }}" != "true" ] && args+=(--no-remote)
+        args+=(${{ inputs.files }})
+        node "${{ github.action_path }}/packages/cli/bin/vlint.js" "${args[@]}" | tee vlint-report.json

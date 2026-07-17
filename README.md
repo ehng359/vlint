@@ -303,6 +303,62 @@ vlint extract && vlint check src/**/*.tsx --json
 
 ---
 
+## CI integration
+
+The repository doubles as a GitHub Action, so gating a PR on drift needs no npm install:
+
+```yaml
+jobs:
+  design-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ehng359/vlint@main
+        with:
+          files: "src/**/*.tsx"
+```
+
+The action fails the job on error-severity violations (`strict: "true"` fails on warnings too) and writes the full JSON report to `vlint-report.json`. Two useful follow-on steps:
+
+**Comment violations on the PR:**
+
+```yaml
+      - if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report = require('./vlint-report.json');
+            const lines = report.results.flatMap(r => r.violations.map(v =>
+              `- **${v.severity}** \`${v.component}.${v.property}\`: expected \`${v.expected}\`, got \`${v.actual}\`` +
+              (v.breakpoint ? ` (at ${v.breakpoint})` : '') +
+              (v.token ? ` [token: ${v.token}]` : '')
+            ));
+            if (lines.length) {
+              github.rest.issues.createComment({
+                ...context.repo, issue_number: context.issue.number,
+                body: `### vlint: design contract violations\n\n${lines.join('\n')}`,
+              });
+            }
+```
+
+**File an issue when the design moved ahead of the snapshot** (needs `remote: "true"` and manifest keys):
+
+```yaml
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const report = require('./vlint-report.json');
+            if (report.drift?.designMovedAhead) {
+              github.rest.issues.create({
+                ...context.repo,
+                title: 'Design moved ahead of DESIGN_REF.json',
+                body: `Figma is at version ${report.drift.liveVersion}; the committed snapshot is ${report.drift.stampedVersion}. Run \`vlint extract\` and commit the refreshed snapshot.`,
+              });
+            }
+```
+
+---
+
 ## Coding agents: the MCP server
 
 `@vlint/mcp` exposes the contract to agents over stdio, with tool responses in the same JSON shapes as `vlint check --json`:
