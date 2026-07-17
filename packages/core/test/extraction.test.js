@@ -85,7 +85,7 @@ test("generateLayoutCss emits border-box and skips browser defaults", () => {
 test("queryFigmaStyles builds the DESIGN_REF shape from API fixtures", async () => {
     warnings = [];
     stubFetch([
-        ["?depth=2", fixture("file-depth2-response.json")],
+        ["?depth=", fixture("file-depth2-response.json")],
         ["/nodes?ids=", fixture("nodes-response.json")],
         ["/variables/local", { meta: { variables: { "VariableID:1:100": { name: "color/primary" } } } }],
     ]);
@@ -126,9 +126,33 @@ test("queryFigmaStyles builds the DESIGN_REF shape from API fixtures", async () 
     assert.match(mdBlock, /width: 160px/);
 });
 
+test("frames inside SECTION containers are found and extracted", async () => {
+    warnings = [];
+    stubFetch([
+        ["?depth=", fixture("file-depth2-response.json")],
+        ["/nodes?ids=", fixture("nodes-response.json")],
+    ]);
+
+    const page = await queryFigmaStyles("dev", "FKEY", "PAT");
+    const pricing = page.nodes.Pricing;
+    assert.ok(pricing, "section-wrapped frame missing from extraction");
+    assert.strictEqual(pricing.width, "900px");
+
+    // per-corner radii serialize as the four-value shorthand
+    assert.strictEqual(pricing.children.Hero.borderRadius, "8px 8px 0px 0px");
+    // gradient fill: backgroundColor omitted entirely, never null
+    assert.ok(!("backgroundColor" in pricing.children.Hero));
+    // rotated node: dimensions omitted, solid fill still translated
+    assert.strictEqual(pricing.children.Badge.width, undefined);
+    assert.strictEqual(pricing.children.Badge.backgroundColor, "#FF0000");
+
+    assert.ok(warnings.some(w => w.includes("gradient/image fill")));
+    assert.ok(warnings.some(w => w.includes("rotated node")));
+});
+
 test("queryFigmaStyles keeps raw variable ids when the Variables API is gated", async () => {
     stubFetch([
-        ["?depth=2", fixture("file-depth2-response.json")],
+        ["?depth=", fixture("file-depth2-response.json")],
         ["/nodes?ids=", fixture("nodes-response.json")],
         // no /variables/local route: falls through to 404, the Enterprise-gated case
     ]);
@@ -139,7 +163,7 @@ test("queryFigmaStyles keeps raw variable ids when the Variables API is gated", 
 });
 
 test("queryFigmaStyles throws a descriptive error for a missing page", async () => {
-    stubFetch([["?depth=2", fixture("file-depth2-response.json")]]);
+    stubFetch([["?depth=", fixture("file-depth2-response.json")]]);
     await assert.rejects(
         () => queryFigmaStyles("nonexistent-page", "FKEY", "PAT"),
         /No frames found on page "nonexistent-page"/

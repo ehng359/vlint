@@ -3,6 +3,36 @@
   "lastModified": "2026-06-08T23:15:40Z",
   "version": "1234567890",
   "nodes": {
+    "285:71": {
+      "document": {
+        "id": "285:71",
+        "name": "Pricing",
+        "type": "FRAME",
+        "absoluteBoundingBox": { "x": 0, "y": 1800, "width": 900, "height": 600 },
+        "children": [
+          {
+            "id": "285:72",
+            "name": "Hero",
+            "type": "RECTANGLE",
+            "absoluteBoundingBox": { "x": 0, "y": 1800, "width": 900, "height": 300 },
+            "rectangleCornerRadii": [8, 8, 0, 0],
+            "fills": [
+              { "type": "GRADIENT_LINEAR", "gradientStops": [] }
+            ]
+          },
+          {
+            "id": "285:73",
+            "name": "Badge",
+            "type": "RECTANGLE",
+            "rotation": 0.2617993877991494,
+            "absoluteBoundingBox": { "x": 700, "y": 1820, "width": 120, "height": 60 },
+            "fills": [
+              { "type": "SOLID", "color": { "r": 1, "g": 0, "b": 0, "a": 1 } }
+            ]
+          }
+        ]
+      }
+    },
     "285:60": {
       "document": {
         "id": "285:60",

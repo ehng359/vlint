@@ -25,3 +25,5 @@ export function getFileMeta(
 ): Promise<{ version: string; lastModified: string }>;
 
 export const SPEC_METADATA_KEYS: Set<string>;
+export const FIGMA_METADATA_KEYS: Set<string>;
+export const CSS_DEFAULTS: Record<string, string>;

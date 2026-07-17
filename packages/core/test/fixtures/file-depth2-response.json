@@ -13,7 +13,15 @@
         "type": "CANVAS",
         "children": [
           { "id": "285:30", "name": "Dashboard", "type": "FRAME" },
-          { "id": "285:60", "name": "Dashboard@md", "type": "FRAME" }
+          { "id": "285:60", "name": "Dashboard@md", "type": "FRAME" },
+          {
+            "id": "285:70",
+            "name": "Marketing",
+            "type": "SECTION",
+            "children": [
+              { "id": "285:71", "name": "Pricing", "type": "FRAME" }
+            ]
+          }
         ]
       }
     ]

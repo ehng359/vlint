@@ -69,10 +69,11 @@ async function getTargetNodeIds(targetPageName, fileKey, accessToken) {
     },
   };
 
-  // depth=2 is perfect here: it gives us the Page (depth 1) and the Frames (depth 2).
-  // API/network failures propagate so callers can report the real cause instead
-  // of misdiagnosing a transient error as a bad page name or token.
-  const response = await fetch(`${FIGMA_API_URL}/files/${fileKey}?depth=2`, requestInit);
+  // depth=3 covers the Page, its top-level frames, and frames one level
+  // inside SECTION containers, which is how most real files are organised.
+  // API/network failures propagate so callers can report the real cause
+  // instead of misdiagnosing a transient error as a bad page name or token.
+  const response = await fetch(`${FIGMA_API_URL}/files/${fileKey}?depth=3`, requestInit);
 
   if (!response.ok) {
     throw new Error(`Figma API returned ${response.status}: ${response.statusText}`);
@@ -80,6 +81,7 @@ async function getTargetNodeIds(targetPageName, fileKey, accessToken) {
 
   const fileData = await response.json();
   const frameIdentifiers = [];
+  let sectionsTraversed = 0;
 
   if (fileData.document && fileData.document.children) {
     const targetPage = fileData.document.children.find(
@@ -87,18 +89,26 @@ async function getTargetNodeIds(targetPageName, fileKey, accessToken) {
     );
 
     if (targetPage && targetPage.children) {
-      targetPage.children.forEach(child => {
+      const takeFrame = (child, pageName) => {
         if (child.type === "FRAME") {
-          frameIdentifiers.push({
-            id: child.id,
-            name: child.name,
-            pageName: targetPage.name
-          });
+          frameIdentifiers.push({ id: child.id, name: child.name, pageName });
+        }
+      };
+      targetPage.children.forEach(child => {
+        if (child.type === "SECTION" && child.children) {
+          sectionsTraversed++;
+          child.children.forEach(inner => takeFrame(inner, targetPage.name));
+        } else {
+          takeFrame(child, targetPage.name);
         }
       });
     } else {
       getLogger().warn(`Page named "${targetPageName}" not found in file.`);
     }
+  }
+
+  if (sectionsTraversed > 0) {
+    getLogger().log(`[vlint] Traversed ${sectionsTraversed} section(s) for frames.`);
   }
 
   if (frameIdentifiers.length > 0) {
@@ -229,7 +239,9 @@ function extractLayoutProperties(node) {
         layoutGrow: node.layoutGrow || 0,
         minWidth: node.minWidth || null,
         maxWidth: node.maxWidth || null,
-        borderRadius: node.cornerRadius || null,
+        rotation: node.rotation || 0,
+        // rectangleCornerRadii is [tl, tr, br, bl] when corners differ
+        borderRadius: node.rectangleCornerRadii ?? node.cornerRadius ?? null,
         padding: {
             top: node.paddingTop || 0,
             right: node.paddingRight || 0,
@@ -262,10 +274,11 @@ async function queryFigmaStyles(page, fileKey, accessToken) {
     lastKnownChange = target.lastModified;
 
     const registry = {};
+    const stats = { unsupportedFills: 0, rotatedNodes: 0 };
 
     for (const key in figmaNodes.nodes) {
         const frameNode = figmaNodes.nodes[key]
-        const translatedFrame = mapFigmaToCss(frameNode);
+        const translatedFrame = mapFigmaToCss(frameNode, stats);
         const childrenMap = {};
 
         function walk(node) {
@@ -274,7 +287,7 @@ async function queryFigmaStyles(page, fileKey, accessToken) {
             // Grab children from the RAW node before translation strips them
             var kids = node.childrenElements || node.children;
 
-            var translatedChild = mapFigmaToCss(node);
+            var translatedChild = mapFigmaToCss(node, stats);
 
             // Scrub any residual tree references from the translated output
             delete translatedChild.childrenElements;
@@ -308,6 +321,15 @@ async function queryFigmaStyles(page, fileKey, accessToken) {
     };
 
     figmaNodes.nodes = registry
+
+    // Anything skipped rather than translated is worth a visible note;
+    // silent gaps are how real files end up "passing" incorrectly
+    if (stats.unsupportedFills > 0) {
+        getLogger().warn(`[vlint] ${stats.unsupportedFills} gradient/image fill(s) had no comparable color and were omitted.`);
+    }
+    if (stats.rotatedNodes > 0) {
+        getLogger().warn(`[vlint] ${stats.rotatedNodes} rotated node(s) had width/height omitted (bounding box is axis-aligned).`);
+    }
 
     // Swap raw variable ids in token bindings for names when the Variables
     // API is readable (Enterprise plans); ids stay put otherwise. Skipped
@@ -492,13 +514,18 @@ function extractTokenBindings(node) {
     return tokens;
 }
 
-function mapFigmaToCss(node) {
+function mapFigmaToCss(node, stats) {
     const css = {};
 
     // --- 1. BOX MODEL ---
     // Figma dimensions are border-box (padding included). Generated CSS sets
     // box-sizing: border-box on [data-figma], so the values pass straight through.
-    if (node.visualDimensions) {
+    // Rotated nodes are skipped: absoluteBoundingBox is the axis-aligned box,
+    // so its width/height would be wrong for the element itself.
+    const rotated = !!node.rotation;
+    if (rotated && stats) stats.rotatedNodes++;
+
+    if (node.visualDimensions && !rotated) {
         var totalWidth  = Math.round(node.visualDimensions.width);
         var totalHeight = Math.round(node.visualDimensions.height);
 
@@ -525,7 +552,12 @@ function mapFigmaToCss(node) {
         if (node.layoutMode === "HORIZONTAL") delete css.height;
     }
 
-    if (node.borderRadius != null && node.borderRadius !== 0) {
+    if (Array.isArray(node.borderRadius)) {
+        const [tl, tr, br, bl] = node.borderRadius;
+        css.borderRadius = (tl === tr && tr === br && br === bl)
+            ? `${tl}px`
+            : `${tl}px ${tr}px ${br}px ${bl}px`;
+    } else if (node.borderRadius != null && node.borderRadius !== 0) {
         css.borderRadius = `${node.borderRadius}px`;
     }
 
@@ -547,11 +579,16 @@ function mapFigmaToCss(node) {
     };
 
     if (node.visuals?.fills?.length > 0) {
-        const color = processColor(node.visuals.fills[0]);
-        if (node.type === "TEXT") {
-            css.color = color;  // text fill = text color
-        } else {
-            css.backgroundColor = color;
+        // First visible solid fill wins; gradient and image fills have no
+        // single comparable color, so the property is omitted (never null)
+        const visible = node.visuals.fills.filter(f => f.visible !== false);
+        const solid = visible.find(f => f.type === 'SOLID');
+        const color = solid ? processColor(solid) : null;
+        if (color) {
+            if (node.type === "TEXT") css.color = color;
+            else css.backgroundColor = color;
+        } else if (visible.length > 0 && stats) {
+            stats.unsupportedFills++;
         }
     }
 
@@ -659,6 +696,7 @@ function mapFigmaToCss(node) {
         itemSpacing,
         layoutAlign,        // mapped to css.alignSelf
         layoutGrow,         // mapped to css.flex
+        rotation,           // gates the box model, never CSS itself
         // Figma enums — mapped to CSS equivalents, raw "MIN"/"MAX" must not leak
         alignItems,         // "MIN" → css.alignItems: "flex-start"
         justifyContent,     // "MIN" → css.justifyContent: "flex-start"
@@ -806,4 +844,7 @@ function generateLayoutCss(frameName, childrenMap, breakpointFrames) {
     return sections.join('\n').trimEnd() + '\n';
 }
 
-module.exports = { queryFigmaStyles, hasFileBeenUpdated, generateLayoutCss, mapFigmaToCss, getFileMeta, SPEC_METADATA_KEYS };
+module.exports = {
+    queryFigmaStyles, hasFileBeenUpdated, generateLayoutCss, mapFigmaToCss,
+    getFileMeta, SPEC_METADATA_KEYS, FIGMA_METADATA_KEYS, CSS_DEFAULTS
+};
