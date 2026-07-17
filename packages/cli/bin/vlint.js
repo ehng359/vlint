@@ -10,7 +10,8 @@ Usage:
   vlint extract                           Fetch from Figma, write DESIGN_REF.json + CSS
   vlint check <file...> [options]         Lint files against DESIGN_REF.json
   vlint fix <file...> [options]           Rewrite drifted inline styles to match the spec
-  vlint spec [Frame]                      Print a frame's spec (no arg lists frames)
+  vlint spec [Frame] [--tailwind]         Print a frame's spec (no arg lists frames)
+  vlint tokens                            Print a Tailwind @theme block from token bindings
 
 Options for check and fix:
   --frame <name>   Validate against this frame instead of the file's @design-frame
@@ -38,6 +39,7 @@ function parseCliArgs(argv) {
             strict: { type: "boolean" },
             "no-remote": { type: "boolean" },
             "dry-run": { type: "boolean" },
+            tailwind: { type: "boolean" },
         },
         strict: true,
         allowPositionals: true,
@@ -244,7 +246,7 @@ function cmdFix(root, positional, flags) {
     if (manualErrors > 0) process.exit(1);
 }
 
-function cmdSpec(root, positional) {
+function cmdSpec(root, positional, flags) {
     const designRef = core.loadDesignRef(root);
     if (!designRef) fail("No DESIGN_REF.json in this directory. Run `vlint extract` first.");
 
@@ -255,10 +257,33 @@ function cmdSpec(root, positional) {
     }
 
     try {
-        console.log(JSON.stringify(core.getFrameSpec(designRef, frameName), null, 2));
+        const spec = core.getFrameSpec(designRef, frameName);
+        if (flags.tailwind) {
+            // The contract rendered as suggested class strings, for agents
+            // generating in the project's styling idiom
+            const children = {};
+            for (const [name, child] of Object.entries(spec.children || {})) {
+                children[name] = core.specToClassName(child);
+            }
+            console.log(JSON.stringify({ frame: core.specToClassName(spec), children }, null, 2));
+        } else {
+            console.log(JSON.stringify(spec, null, 2));
+        }
     } catch (err) {
         fail(err.message);
     }
+}
+
+function cmdTokens(root) {
+    const designRef = core.loadDesignRef(root);
+    if (!designRef) fail("No DESIGN_REF.json in this directory. Run `vlint extract` first.");
+
+    const theme = core.designRefToTheme(designRef);
+    if (!theme) {
+        console.error("[vlint] No named token bindings in DESIGN_REF.json (Variables API may be unreadable on this plan).");
+        return;
+    }
+    console.log(theme.trimEnd());
 }
 
 async function main() {
@@ -275,7 +300,8 @@ async function main() {
         case "extract": await cmdExtract(root); break;
         case "check": await cmdCheck(root, positional, flags); break;
         case "fix": cmdFix(root, positional, flags); break;
-        case "spec": cmdSpec(root, positional); break;
+        case "spec": cmdSpec(root, positional, flags); break;
+        case "tokens": cmdTokens(root); break;
         case "help": case undefined: console.log(USAGE); break;
         default: fail(`Unknown command "${command}".\n\n` + USAGE);
     }

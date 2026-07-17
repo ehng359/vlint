@@ -1,7 +1,8 @@
 import {
-	applyStyleFixes, extractDataFigmaNames, FigmaPage, FrameSpec, getFileMeta,
-	lintSource, loadCssModules, parseManifest, queryFigmaStyles, setLogger,
-	StyleFix, Violation, violationMessage, violationToStyleFix
+	applyClassFixes, applyStyleFixes, ClassFix, extractDataFigmaNames, FigmaPage,
+	FrameSpec, getFileMeta, lintSource, loadCssModules, parseManifest,
+	queryFigmaStyles, setLogger, StyleFix, Violation, violationMessage,
+	violationToClassFix, violationToStyleFix
 } from '@vlint/core';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -85,24 +86,32 @@ export function activate(context: vscode.ExtensionContext) {
 				provideCodeActions(document, range): vscode.CodeAction[] {
 					const violations = violationsByUri.get(document.uri.toString()) ?? [];
 					const actions: vscode.CodeAction[] = [];
+					const offer = (title: string, command: string, payload: StyleFix | ClassFix) => {
+						const action = new vscode.CodeAction(title, vscode.CodeActionKind.QuickFix);
+						// The rewrite is computed when the action is invoked, against
+						// the document's text at that moment, never against a snapshot
+						action.command = { command, title, arguments: [document.uri, payload] };
+						actions.push(action);
+					};
+
 					for (const v of violations) {
-						const fix = violationToStyleFix(v);
-						if (!fix) continue;
 						const line = v.loc ? Math.max(0, v.loc.line - 1) : 0;
 						if (range.start.line > line || range.end.line < line) continue;
 
-						const action = new vscode.CodeAction(
-							`Apply Figma value: ${fix.propName} = ${JSON.stringify(fix.figmaValue)}`,
-							vscode.CodeActionKind.QuickFix
-						);
-						// The rewrite is computed when the action is invoked, against
-						// the document's text at that moment, never against a snapshot
-						action.command = {
-							command: 'vlint.applyFix',
-							title: action.title,
-							arguments: [document.uri, fix],
-						};
-						actions.push(action);
+						const styleFix = violationToStyleFix(v);
+						if (styleFix) {
+							offer(
+								`Apply Figma value: ${styleFix.propName} = ${JSON.stringify(styleFix.figmaValue)}`,
+								'vlint.applyFix', styleFix
+							);
+						}
+						const classFix = violationToClassFix(v);
+						if (classFix) {
+							const shown = classFix.breakpoint
+								? classFix.utility.split(/\s+/).map(p => `${classFix.breakpoint}:${p}`).join(' ')
+								: classFix.utility;
+							offer(`Apply Figma class: ${shown}`, 'vlint.applyClassFix', classFix);
+						}
 					}
 					return actions;
 				},
@@ -111,16 +120,21 @@ export function activate(context: vscode.ExtensionContext) {
 		)
 	);
 
+	const applyRewrite = async (uri: vscode.Uri, rewrite: (source: string) => string) => {
+		const document = await vscode.workspace.openTextDocument(uri);
+		const current = document.getText();
+		const fixed = rewrite(current);
+		if (fixed === current) return;
+		const edit = new vscode.WorkspaceEdit();
+		edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(current.length)), fixed);
+		await vscode.workspace.applyEdit(edit);
+	};
+
 	context.subscriptions.push(
-		vscode.commands.registerCommand('vlint.applyFix', async (uri: vscode.Uri, fix: StyleFix) => {
-			const document = await vscode.workspace.openTextDocument(uri);
-			const current = document.getText();
-			const fixed = applyStyleFixes(current, [fix]);
-			if (fixed === current) return;
-			const edit = new vscode.WorkspaceEdit();
-			edit.replace(uri, new vscode.Range(document.positionAt(0), document.positionAt(current.length)), fixed);
-			await vscode.workspace.applyEdit(edit);
-		})
+		vscode.commands.registerCommand('vlint.applyFix', (uri: vscode.Uri, fix: StyleFix) =>
+			applyRewrite(uri, (source) => applyStyleFixes(source, [fix]))),
+		vscode.commands.registerCommand('vlint.applyClassFix', (uri: vscode.Uri, fix: ClassFix) =>
+			applyRewrite(uri, (source) => applyClassFixes(source, [fix])))
 	);
 
 	// ─── PAT handling ─────────────────────────────────────────────────────────

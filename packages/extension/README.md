@@ -40,7 +40,7 @@ On activation, and on every subsequent save where the Figma file has changed, th
 - **Scope:** Only the frames declared in the workspace manifest are queried. A `depth=2` pre-flight retrieves page and top-level frame IDs; a second targeted request retrieves the full node tree.
 - **Output:** A `DESIGN_REF.json` file written to the workspace root, containing CSS-translated style properties keyed by component name.
 
-The extraction pipeline handles component variants, design token resolution (via `boundVariables`), and style library references. Layout properties from Figma's Auto Layout system (`layoutMode`, `itemSpacing`, `paddingTop`, etc.) are mapped to their CSS equivalents (`flexDirection`, `gap`, `padding`, etc.) via `mapFigmaToCss`. A cooldown of 60 seconds prevents excessive API calls on rapid saves.
+The extraction pipeline handles component variants, design token resolution (via `boundVariables`), and style library references. Layout properties from Figma's Auto Layout system (`layoutMode`, `itemSpacing`, `paddingTop`, etc.) are mapped to their CSS equivalents (`flexDirection`, `gap`, `padding`, etc.) via `mapFigmaToCss`. A short cooldown (5 seconds) prevents excessive API calls on rapid saves, and the fetch itself only happens when Figma reports a newer `lastModified`.
 
 ### 2. The Token Manifest
 
@@ -109,14 +109,16 @@ The parser returns a map of `componentName → StyleProp[]`, where each `StylePr
 On every `.jsx` / `.tsx` save, the extension:
 
 1. Looks up the `@design-frame` declaration in the file to identify which root Figma frame to compare against.
-2. Iterates over every annotated component and cross-references its extracted style props against the corresponding node in `DESIGN_REF.json`.
-3. Detects two categories of violation:
-   - **Value mismatch** — the property exists in both code and Figma but the values differ.
-   - **Missing property** — the property exists in the Figma specification but is absent from the code entirely.
-4. Applies a normalisation layer before comparison to handle equivalent representations: `16px === 16`, `bold === 700`, `#FFF === #ffffff === rgba(255,255,255,1)`.
-5. Queues all violations as structured `StyleFix` objects and applies them in a single Babel AST transformation pass, writing the corrected source back to disk via VS Code's `WorkspaceEdit` API.
+2. Runs `lintSource` from `@vlint/core`: one AST traversal that cross-references every annotated component's static style props against the corresponding node in `DESIGN_REF.json`.
+3. Detects four categories of violation:
+   - **Value mismatch** (error): the property exists in both code and Figma but the values differ.
+   - **Missing property** (warning): the property exists in the Figma specification but is absent from the code. Usually harmless, since the generated CSS supplies it.
+   - **Hardcoded token** (warning): the value matches today, but the Figma property is bound to a design variable. The code will silently go stale when the token changes upstream.
+   - **Unknown component** (warning): the annotation has no counterpart in the frame.
+4. Applies a normalisation layer before comparison to handle equivalent representations: `16px === 16`, `bold === 700`, `#FFF === #ffffff === rgba(255,255,255,1)`. A `var(--color-primary)` reference is checked against the bound token's name rather than its current value, and `theme.x.y` member expressions are treated as design-system references, present but exempt from value comparison.
+5. Publishes every violation as an editor diagnostic (squiggles at the exact source location) with an "Apply Figma value" quick fix. With `vlint.autoFix` enabled (off by default), mismatches and missing properties are corrected in a single Babel AST transformation pass and written back via `WorkspaceEdit`.
 
-All findings are reported to a dedicated **vlint** output channel in the VS Code panel.
+Findings also stream to the **vlint** output channel in the VS Code panel.
 
 ---
 
@@ -125,9 +127,6 @@ All findings are reported to a dedicated **vlint** output channel in the VS Code
 vlint expects a `design.manifest` file at the workspace root with the following keys:
 
 ```ini
-# Figma Personal Access Token
-FIGMA_PAT = your_personal_access_token
-
 # Figma file key (from the URL: figma.com/file/<KEY>/...)
 FIGMA_FKEY = your_file_key
 
@@ -136,9 +135,14 @@ FIGMA_DEV_PAGE = Development
 
 # Optional: output directory for generated CSS files (default: src/styles/figma)
 FIGMA_STYLES_DIR = src/styles/figma
+
+# Optional, CLI only: the extension stores the token in VS Code secret storage instead
+FIGMA_PAT = your_personal_access_token
 ```
 
-The manifest is re-parsed automatically whenever it is saved, so credentials and targets can be updated without reloading the extension.
+In the editor, set the token with the **vlint: Set Figma Token** command; it lives in VS Code secret storage, not on disk. A `FIGMA_PAT` found in the manifest is migrated into secret storage on activation so it can be deleted from the file. Keep `design.manifest` gitignored if the token stays in it for CLI use.
+
+The manifest is re-parsed automatically whenever it is saved, so targets can be updated without reloading the extension.
 
 ---
 
@@ -148,6 +152,9 @@ The manifest is re-parsed automatically whenever it is saved, so credentials and
 |---|---|---|
 | `@design-frame <FrameName>` | File-level comment | Declares which root Figma frame this file maps to |
 | `@design-component <NodeName>` | Leading comment or inline JSX comment on a JSX element | Declares that the annotated element implements the named Figma node |
+| `@design-override <prop...>` | Next to a `@design-component` annotation | Declares intentional divergence: the listed properties are exempt from validation on this element |
+
+The contract defines what is "base" versus what is yours. Spec properties on an annotated component are the base and must match (or be explicitly overridden); anything the code adds beyond the spec, hover states, transitions, shadows, cursor styles, is additional by definition and never touched. `@design-override` is the middle case: a spec property you are deliberately diverging from. It keeps the divergence visible and greppable in the code instead of letting it hide as a suppressed warning.
 
 ### File-level example
 
@@ -181,12 +188,18 @@ Unannotated descendants are ignored by the linter. The `data-figma` attribute do
 
 ```
 packages/
-├── core/                  # Shared logic, published as @vlint/core
+├── core/                  # Shared engine, published as @vlint/core
 │   ├── extraction.js      # Figma REST API client, CSS mapping, and CSS generation
 │   ├── parser.ts          # Babel AST annotation extractor and style fixer
+│   ├── validate.ts        # lintSource: the violation engine + value/token normalisation
+│   ├── workspace.ts       # DESIGN_REF loading and per-file checking (CLI/MCP shape)
+│   ├── manifest.ts        # design.manifest parsing
+│   ├── logger.ts          # Injectable logging so hosts own their output
 │   └── index.ts           # Type definitions and public exports
+├── cli/                   # @vlint/cli: headless `vlint` binary for CI and agents
+├── mcp/                   # @vlint/mcp: MCP server over the same engine
 └── extension/             # VS Code extension host
-    └── extension.ts       # Activation, manifest parsing, save hook, diff engine
+    └── extension.ts       # Activation, save hook, diagnostics, quick fixes
 ```
 
 ---
@@ -218,12 +231,182 @@ All linter output is written to the **vlint** output channel in VS Code:
 ✓ Sidebar matches Figma spec.
 ✓ StatBlock matches Figma spec.
 
-[vlint] Mismatches detected:
-  Style Mismatch in "NavItem": borderRadius — Code: 0, Figma: 8px
-  Missing in code — "StatLabel.color": Figma has #999999
+[vlint] Violations detected:
+  [error] NavItem.borderRadius is 0, Figma says "8px"
+  [warning] StatLabel.color missing in code, Figma says "#999999"
+  [warning] Sidebar.backgroundColor matches today but hardcodes token "color/primary", will drift silently
 
 [vlint] Applying 2 fix(es)...
 [vlint] ✓ Source updated. Saving...
 ```
 
+The same violations appear as squiggles in the editor, each carrying an "Apply Figma value" quick fix. The rewrite-on-save pass only runs with `"vlint.autoFix": true`.
+
 ---
+
+## Tailwind support
+
+Annotated elements styled with Tailwind classes are validated with the same engine as inline styles. vlint ships its own static resolver for the utilities that map onto the properties it checks, built against Tailwind v4 semantics (dynamic spacing at `n × 0.25rem`, the v4 radius and text scales) with v3 fallbacks where they are unambiguous.
+
+```tsx
+{/* @design-component Sidebar */}
+<div data-figma="Sidebar" className="flex flex-col w-55 gap-2 rounded-xl bg-primary" />
+```
+
+Three tiers, mirroring the inline-style rules:
+
+- **Concrete utilities** (`w-55`, `p-[20px]`, `rounded-xl`, `bg-[#1A1A38]`, `text-4xl`, `font-semibold`) resolve to CSS values and are compared against the spec, including the hardcoded-token warning when the Figma property is bound to a variable.
+- **Theme token utilities** (`bg-primary`, `bg-(--color-primary)`, `bg-[var(--color-primary)]`) are token references: clean when they name the bound Figma token, otherwise present and exempt.
+- **Statically unresolvable classes** (`w-full`, `leading-tight`, palette shades like `bg-slate-900`, any `hover:`/`md:` variant) mark the property as present and exempt from comparison. The resolver never turns uncertainty into an error.
+
+Inline `style` wins over className, matching CSS. Within one className string, the last conflicting utility wins. Dynamic expressions (`clsx(...)`, template literals) have nothing statically resolvable and are ignored.
+
+### CSS modules
+
+`className={styles.sidebar}` resolves too. vlint reads the imported `.module.css` file, parses the class's declarations, and validates them through the same pipeline: concrete values compare against the spec, `var(--color-primary)` counts as a token reference, `calc(...)` is present-but-exempt, and `@media (min-width: ...)` blocks at the standard breakpoint widths feed the responsive passes. Only bare single-class selectors are attributed; pseudo classes, combinators, and `composes` chains are skipped rather than guessed at.
+
+### Responsive validation
+
+Breakpoints are part of the contract. Publish a Figma frame named `Dashboard@md` (or `@sm`, `@lg`, `@xl`, `@2xl`) and vlint validates each breakpoint against the mobile-first cascade of the element's responsive classes:
+
+```tsx
+{/* @design-component Sidebar */}
+<div data-figma="Sidebar" className="w-55 md:w-40" />
+```
+
+At `md`, the effective width is the cascade of the base utilities plus every override up to and including `md:`. A base-only `w-55` that should shrink at `md` is caught as drift against `Dashboard@md`, and each violation names its breakpoint. Breakpoint passes report mismatches only, so missing-property warnings are not repeated per frame. State variants (`hover:`, `dark:`) stay out of scope, and Figma's min/max width resizing bounds map to `min-width`/`max-width`, validated against `min-w-*`/`max-w-*` utilities.
+
+Breakpoint frames also shape the generated CSS. Instead of a standalone `Dashboard@md.figma.css`, the base `Dashboard.figma.css` gains mobile-first `@media (min-width: 768px)` blocks containing only the properties that change at that width, diffed against the cascade so far. A component with no Tailwind classes at all still renders responsively from the design data alone. Breakpoint widths follow Tailwind's defaults: sm 640, md 768, lg 1024, xl 1280, 2xl 1536.
+
+---
+
+## Headless usage: the CLI
+
+`@vlint/cli` runs the same engine without an editor. From a workspace containing `design.manifest`:
+
+```bash
+vlint extract                    # fetch from Figma, write DESIGN_REF.json + CSS
+vlint check src/Dashboard.tsx    # lint against the committed snapshot
+vlint check src/*.tsx --json     # structured violations for tooling
+vlint fix src/*.tsx              # rewrite drift to match the spec
+vlint fix src/*.tsx --dry-run    # report what would change, touch nothing
+vlint spec Dashboard             # print a frame's spec (no arg lists frames)
+```
+
+`fix` speaks the file's own styling language. Inline-style mismatches are corrected in place; class-sourced and breakpoint drift is fixed by editing the className with the canonical utility (`rounded-lg` becomes `rounded-xl`, a missing md override becomes `md:w-40`), never by shadowing a class with an inline override. Token-bound colors are fixed to the token utility (`bg-primary`) rather than freezing today's hex. What cannot be fixed safely (CSS-module drift, unmappable shorthands) is reported for manual attention and exits 1.
+
+Exit codes: `0` clean, `1` violations, `2` configuration error. Errors fail the run; add `--strict` to fail on warnings too. Unless `--no-remote` is passed, `check` also probes the live Figma file version and labels the drift direction: the design moved ahead of the snapshot (run `vlint extract`), or the code diverged from the snapshot (fix the code). A CI job is just:
+
+```bash
+vlint extract && vlint check src/**/*.tsx --json
+```
+
+---
+
+## Coding agents: the MCP server
+
+`@vlint/mcp` exposes the contract to agents over stdio, with tool responses in the same JSON shapes as `vlint check --json`:
+
+| Tool | Purpose |
+|---|---|
+| `list_frames` | Discover the frames in `DESIGN_REF.json` and the snapshot version |
+| `get_frame_spec` | Pull one frame's full spec, including token bindings |
+| `validate_file` | Lint a source file, returning violations with locations |
+
+Register it with a workspace root:
+
+```json
+{
+  "mcpServers": {
+    "vlint": {
+      "command": "vlint-mcp",
+      "env": { "VLINT_ROOT": "/path/to/your/app" }
+    }
+  }
+}
+```
+
+The intended loop: the agent calls `get_frame_spec` before writing code, so the implementation starts from the contract; then `validate_file` after each edit, fixing violations until the list is empty. Figma's Dev Mode MCP server covers generation-time context; vlint covers the verification half, and keeps covering it in CI after the agent is gone.
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| `@babel/parser` | JSX + TypeScript AST parsing |
+| `@babel/traverse` | AST traversal and mutation |
+| `@babel/generator` | AST-to-source code generation |
+| `@babel/types` | AST node constructors |
+| `vscode` | Extension API, WorkspaceEdit, OutputChannel |
+
+---
+
+## Testing Extension Updates
+
+### Development & Testing
+
+This project is a monorepo. To test the VS Code extension and the core AST logic locally, follow these steps:
+
+#### 1. Initial Setup
+
+From the project root, install all dependencies for the workspace:
+
+```bash
+npm install
+```
+
+#### 2. Start the Compiler
+
+We use esbuild for lightning-fast bundling. You must have the watcher running so that changes in the `core` or `extension` packages are reflected in real time.
+
+```bash
+# From the root directory
+npm run watch --workspace=packages/extension
+```
+
+#### 3. Launch the Extension Sandbox
+
+Open this project in VS Code. Press `F5` or go to the Run and Debug view and select **Launch Extension**. A new window titled `[Extension Development Host]` will open — this is your sandbox.
+
+#### 4. Verifying the Extension
+
+Once the sandbox window is open:
+
+- **On Save:** Open any `.jsx` or `.tsx` file annotated with `@design-frame` and save it. The vlint output channel will open automatically and report findings.
+
+#### 5. Debugging
+
+Logs from the extension (including `console.log`) appear in the **Debug Console** of your primary VS Code window. To apply code changes made in `extension.ts`, click the reload button on the floating debug toolbar.
+
+---
+
+## Roadmap
+
+The phases below are broken down into concrete tasks with done-criteria in [ROADMAP.md](./ROADMAP.md). As of July 2026 all five phases have landed: the validation engine is wired end to end, the CLI and MCP server ship as workspace packages, token bindings ride through extraction, and snapshots carry version stamps for drift direction. The descriptions below are kept as the design rationale for each piece.
+
+### 1. Wire the validation engine end to end
+
+Add a single entry point to core, `lintSource(source, frameSpec) -> Violation[]`, that traverses the AST once, pairs each annotated component's style props against `DESIGN_REF.json`, and runs both sides through the normalisation layer before comparing. The save handler then consumes that list: report every violation, and apply `applyStyleFixes` for the ones the developer has opted into. This also moves `normaliseValue` out of the extension and into core where the rest of the engine lives.
+
+### 2. Headless CLI
+
+A `vlint check <file> --json` binary over the same core engine. Output is a structured violation list: component, property, expected, actual, source location, severity. This is what makes vlint usable outside the editor. CI can fail a PR on drift, and coding agents can run the check in their edit loop the same way they run `tsc` or `eslint`, fixing violations until the output is clean. A companion `vlint spec <Frame>` prints the extracted frame spec so an agent can generate correct code from the contract up front instead of only repairing it afterwards.
+
+### 3. MCP server
+
+A thin MCP wrapper over core exposing `list_frames`, `get_frame_spec`, and `validate_file`. Figma's own Dev Mode MCP server hands agents design context at generation time; vlint covers the other half of the loop, verification after the code exists and enforcement over time. The VS Code extension becomes one client of this engine among several.
+
+### 4. Token-level contract
+
+Extraction already receives `boundVariables` and style references from the API but discards them during CSS translation. Keeping them enables a stronger check than value equality: validating that code references the design token itself (`var(--color-primary)`, `theme.colors.primary`) rather than a hardcoded value that happens to match today. Checks then report at three levels: token reference matches (clean), value matches but is hardcoded (latent drift, the value will silently go stale when the token changes upstream), and value mismatch (drift). The middle tier is the point of this phase. It catches drift before it is visible, which is exactly the failure mode coding agents introduce. One constraint to verify early: resolving variable IDs to names and values through the Variables REST endpoint is gated to Enterprise plans, so the fallback is inferring token identity from published style metadata already present in node responses.
+
+### 5. Drift direction
+
+Stamp the Figma file `version` into `DESIGN_REF.json` at extraction time. A check can then distinguish "the design moved ahead of the committed snapshot" from "the code diverged from the snapshot". These are different failures with different fixes (re-extract vs. correct the code), and a tool consuming the JSON output can act on that distinction automatically.
+
+### Supporting work
+
+- Unit tests for core (`mapFigmaToCss`, `generateLayoutCss`, the parser, normalisation) against fixture Figma API responses. These functions are pure and cheap to test, and they gate everything above.
+- Editor diagnostics via `DiagnosticCollection` with quick-fix code actions, replacing output-channel-only reporting.
+- Move the Figma PAT out of `design.manifest` and into VS Code `SecretStorage`.

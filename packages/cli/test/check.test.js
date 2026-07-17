@@ -61,6 +61,14 @@ test("check exits 0 on a clean file", () => {
     assert.strictEqual(code, 0);
 });
 
+test("spec --tailwind renders components as class strings", () => {
+    const dir = makeWorkspace();
+    const { code, stdout } = run(dir, ["spec", "Dashboard", "--tailwind"]);
+    assert.strictEqual(code, 0);
+    const out = JSON.parse(stdout);
+    assert.strictEqual(out.children.StatBlock, "rounded-xl");
+});
+
 test("spec with no argument lists frames", () => {
     const dir = makeWorkspace();
     const { code, stdout } = run(dir, ["spec"]);
