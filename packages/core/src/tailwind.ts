@@ -136,6 +136,11 @@ function paddingUtility(prefix: string, value: string, sides: Sides): boolean {
   return false;
 }
 
+// "color/primary" (Figma) -> "color-primary" (CSS custom property name)
+export function tokenToCssVarName(tokenName: string): string {
+  return tokenName.toLowerCase().replace(/[\s/]+/g, "-");
+}
+
 // ── inverse mapping: spec value -> canonical utility ─────────────────────────
 
 const STATIC_UTILITIES: Record<string, Record<string, string>> = {
@@ -221,6 +226,71 @@ export function figmaValueToUtility(prop: string, value: string | number, token?
   }
 
   return null;
+}
+
+/**
+ * The suggested className for one spec node: every mappable property as its
+ * canonical utility, token-bound colors as token utilities. Agents call this
+ * (via `vlint spec --tailwind`) to generate from the contract in the
+ * project's styling idiom instead of translating px values by hand.
+ */
+export function specToClassName(spec: Record<string, any>): string {
+  const tokens: Record<string, string> = spec.tokens ?? {};
+  const parts: string[] = [];
+
+  // A named text size utility implies its line height; only emit leading-*
+  // when the pair doesn't match
+  const fontSizeUtility = typeof spec.fontSize === "string"
+    ? figmaValueToUtility("fontSize", spec.fontSize, tokens.fontSize)
+    : null;
+  const namedSize = fontSizeUtility && !fontSizeUtility.includes("[")
+    ? fontSizeUtility.slice("text-".length) : null;
+  const lineHeightImplied = !!(namedSize && TEXT_SIZES[namedSize]
+    && TEXT_SIZES[namedSize][1] === spec.lineHeight);
+
+  for (const [prop, value] of Object.entries(spec)) {
+    if (typeof value !== "string" && typeof value !== "number") continue;
+    if (prop === "id" || prop === "name" || prop === "type") continue;
+    if (prop === "lineHeight" && lineHeightImplied) continue;
+    const utility = prop === "fontSize" ? fontSizeUtility : figmaValueToUtility(prop, value, tokens[prop]);
+    if (utility) parts.push(utility);
+  }
+  return parts.join(" ");
+}
+
+/**
+ * A Tailwind v4 @theme block from a DESIGN_REF's token bindings, so the
+ * Figma variables and the project theme provably share names. Values come
+ * from the spec properties the tokens are bound to; raw VariableID bindings
+ * (Variables API unreadable) are skipped since they have no usable name.
+ */
+export function designRefToTheme(designRef: any): string {
+  const entries: Record<string, string | number> = {};
+
+  const collect = (node: any) => {
+    if (!node?.tokens) return;
+    for (const [prop, tokenName] of Object.entries(node.tokens as Record<string, string>)) {
+      if (tokenName.startsWith("VariableID:")) continue;
+      const varName = tokenToCssVarName(tokenName);
+      const value = node[prop];
+      if ((typeof value === "string" || typeof value === "number") && !(varName in entries)) {
+        entries[varName] = value;
+      }
+    }
+  };
+
+  for (const frame of Object.values(designRef?.nodes ?? {}) as any[]) {
+    collect(frame);
+    for (const child of Object.values(frame?.children ?? {})) collect(child);
+  }
+
+  const names = Object.keys(entries).sort();
+  if (names.length === 0) return "";
+  return [
+    "@theme {",
+    ...names.map((n) => `  --${n}: ${entries[n]};`),
+    "}",
+  ].join("\n") + "\n";
 }
 
 interface Sink extends UtilityBucket {

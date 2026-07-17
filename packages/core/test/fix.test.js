@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { figmaValueToUtility } = require("../dist/tailwind");
+const { designRefToTheme, figmaValueToUtility, specToClassName } = require("../dist/tailwind");
 const { applyClassFixes } = require("../dist/parser");
 const { lintSource, violationToClassFix } = require("../dist/validate");
 
@@ -20,6 +20,59 @@ test("token-bound colors emit the token utility, not the frozen value", () => {
     assert.strictEqual(figmaValueToUtility("backgroundColor", "#1A1A38", "color/primary"), "bg-primary");
     assert.strictEqual(figmaValueToUtility("backgroundColor", "#1A1A38", "spacing/weird"), "bg-(--spacing-weird)");
     assert.strictEqual(figmaValueToUtility("backgroundColor", "#1A1A38"), "bg-[#1A1A38]");
+});
+
+test("specToClassName renders a node as canonical utilities", () => {
+    const className = specToClassName({
+        id: "1", name: "Sidebar", type: "FRAME",
+        width: "220px", backgroundColor: "#1A1A38", borderRadius: "12px",
+        display: "flex", flexDirection: "column", gap: "8px", padding: "20px 24px",
+        tokens: { backgroundColor: "color/primary" },
+    });
+    const parts = className.split(" ");
+    assert.ok(parts.includes("w-55"));
+    assert.ok(parts.includes("bg-primary"));
+    assert.ok(parts.includes("rounded-xl"));
+    assert.ok(parts.includes("flex"));
+    assert.ok(parts.includes("flex-col"));
+    assert.ok(parts.includes("gap-2"));
+    assert.ok(parts.includes("py-5"));
+    assert.ok(parts.includes("px-6"));
+});
+
+test("specToClassName skips lineHeight implied by a named text size", () => {
+    const className = specToClassName({
+        id: "1", name: "Title", type: "TEXT",
+        fontSize: "36px", lineHeight: "40px", fontWeight: 600,
+    });
+    assert.ok(className.includes("text-4xl"));
+    assert.ok(!className.includes("leading"));
+    // a non-matching pair keeps its explicit leading
+    const custom = specToClassName({ id: "2", name: "T", type: "TEXT", fontSize: "36px", lineHeight: "44px" });
+    assert.ok(custom.includes("leading-11"));
+});
+
+test("designRefToTheme emits token variables with their bound values", () => {
+    const theme = designRefToTheme({
+        nodes: {
+            Dashboard: {
+                id: "1", type: "FRAME",
+                tokens: { backgroundColor: "color/surface" },
+                backgroundColor: "#FFFFFF",
+                children: {
+                    Sidebar: {
+                        id: "2", name: "Sidebar", type: "FRAME",
+                        backgroundColor: "#1A1A38", gap: "8px",
+                        tokens: { backgroundColor: "color/primary", gap: "VariableID:9:9" },
+                    },
+                },
+            },
+        },
+    });
+    assert.match(theme, /^@theme \{/);
+    assert.match(theme, /--color-primary: #1A1A38;/);
+    assert.match(theme, /--color-surface: #FFFFFF;/);
+    assert.doesNotMatch(theme, /VariableID/);
 });
 
 test("applyClassFixes replaces the conflicting utility in place", () => {

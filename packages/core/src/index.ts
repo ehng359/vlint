@@ -5,7 +5,7 @@ import {
     applyClassFixes, applyStyleFixes, ClassFix, extractDataFigmaNames,
     extractStyleProps, getDesignAnnotation, getDesignOverrides, StyleFix, StyleProp
 } from "./parser";
-import { figmaValueToUtility } from './tailwind';
+import { designRefToTheme, figmaValueToUtility, specToClassName } from './tailwind';
 import {
     FrameSpec, lintSource, normaliseValue, SpecNode,
     tokenToCssVarName, Violation, ViolationKind,
@@ -150,7 +150,7 @@ interface FigmaPage {
 
 export {
     applyClassFixes, applyStyleFixes, checkFile, CheckResult, ClassFix,
-    checkSource, extractDataFigmaNames, extractStyleProps, FigmaColor,
+    checkSource, designRefToTheme, extractDataFigmaNames, extractStyleProps, FigmaColor,
     FigmaElement,
     FigmaFrame,
     FigmaPage,
@@ -179,6 +179,7 @@ export {
     resolveTailwindClasses,
     setLogger,
     SpecNode,
+    specToClassName,
     StyleFix,
     StyleProp,
     tokenToCssVarName,

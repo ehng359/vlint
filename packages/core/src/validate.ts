@@ -1,6 +1,6 @@
 import { parse } from "@babel/parser";
 import traverse from "@babel/traverse";
-import { SPEC_METADATA_KEYS } from "./extraction";
+import { CSS_DEFAULTS, FIGMA_METADATA_KEYS, SPEC_METADATA_KEYS } from "./extraction";
 import { getLogger } from "./logger";
 import { parseCssModuleClasses } from "./cssmodules";
 import {
@@ -9,7 +9,7 @@ import {
 } from "./parser";
 import {
   BREAKPOINTS, effectiveAtBreakpoint, figmaValueToUtility,
-  ResolvedUtilities, resolveTailwindClasses, UtilityBucket
+  ResolvedUtilities, resolveTailwindClasses, tokenToCssVarName, UtilityBucket
 } from "./tailwind";
 
 export type ViolationKind =
@@ -124,10 +124,7 @@ export function normaliseValue(value: string | number): string {
   return str.toLowerCase();
 }
 
-// "color/primary" (Figma) -> "color-primary" (CSS custom property name)
-export function tokenToCssVarName(tokenName: string): string {
-  return tokenName.toLowerCase().replace(/[\s/]+/g, "-");
-}
+export { tokenToCssVarName } from "./tailwind";
 
 function isTokenReference(value: string | number | boolean): boolean {
   return typeof value === "string" && /^var\(--[\w-]+/.test(value);
@@ -284,6 +281,10 @@ export function lintSource(
 
         for (const [prop, expected] of Object.entries(targetSpec)) {
           if (SPEC_METADATA_KEYS.has(prop)) continue;
+          // Legacy snapshots carry raw Figma keys (layoutMode, itemSpacing)
+          // and raw enum values ("MIN", "INHERIT") that were never CSS
+          if (FIGMA_METADATA_KEYS.has(prop)) continue;
+          if (typeof expected === "string" && /^[A-Z][A-Z_]*$/.test(expected)) continue;
           if (overrides.has(prop)) continue; // declared intentional divergence
           if (typeof expected !== "string" && typeof expected !== "number") continue;
 
@@ -292,6 +293,11 @@ export function lintSource(
 
           if (!found) {
             if (mismatchOnly) continue;
+            // A spec value equal to the browser default needs no declaration
+            // anywhere; warning about it would be pure noise
+            const def = CSS_DEFAULTS[prop];
+            if (def !== undefined && normaliseValue(expected) === normaliseValue(def)) continue;
+            if (String(expected) === "0" || String(expected) === "0px") continue;
             // Warning, not error: the generated .figma.css usually supplies it.
             violations.push({
               component: componentName,

@@ -127,6 +127,22 @@ test("unparseable source returns no violations instead of throwing", () => {
     assert.deepStrictEqual(lint("const broken = <div"), []);
 });
 
+test("legacy snapshots with raw Figma metadata produce no bogus warnings", () => {
+    // Shape taken from a real pre-engine DESIGN_REF.json found in the wild
+    const legacyFrame = {
+        id: "1", type: "FRAME",
+        layoutMode: "NONE", itemSpacing: 0, layoutAlign: "INHERIT",
+        layoutGrow: 0, borderRadius: 0, alignItems: "MIN", justifyContent: "MIN",
+        width: "1440px",
+        children: {},
+    };
+    const violations = lintSource(`
+        // @design-component Home
+        const H = () => <div data-figma="Home" style={{ width: 1440 }} />;
+    `, "Home", legacyFrame);
+    assert.deepStrictEqual(violations, []);
+});
+
 test("violations carry their source and violationToStyleFix respects it", () => {
     const inline = lint(`
         // @design-component StatBlock
