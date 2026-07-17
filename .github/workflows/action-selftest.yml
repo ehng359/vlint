@@ -1,0 +1,49 @@
+name: Action self-test
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build a fixture workspace
+        run: |
+          mkdir -p selftest
+          cat > selftest/DESIGN_REF.json << 'EOF'
+          {
+            "extractedAt": "2026-07-17T00:00:00.000Z",
+            "version": "1",
+            "nodes": {
+              "Dashboard": {
+                "id": "1", "type": "FRAME",
+                "children": {
+                  "StatBlock": { "id": "2", "name": "StatBlock", "type": "FRAME", "borderRadius": "12px" }
+                }
+              }
+            },
+            "generatedCss": {}
+          }
+          EOF
+          cat > selftest/Good.tsx << 'EOF'
+          // @design-frame Dashboard
+          // @design-component StatBlock
+          export const S = () => <div data-figma="StatBlock" className="rounded-xl" />;
+          EOF
+
+      - name: Run the action against the fixture
+        uses: ./
+        with:
+          files: Good.tsx
+          working-directory: selftest
+
+      - name: Report file exists and is clean
+        run: |
+          node -e "
+            const r = require('./selftest/vlint-report.json');
+            if (r.summary.errors !== 0) process.exit(1);
+            console.log('self-test report:', JSON.stringify(r.summary));
+          "
