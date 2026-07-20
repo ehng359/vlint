@@ -124,13 +124,30 @@ Findings also stream to the **vlint** output channel in the VS Code panel.
 
 ## Workspace Configuration
 
-vlint expects a `design.manifest` file at the workspace root with the following keys:
+The fastest way to configure a workspace is to paste a Figma link. No manifest keys by hand.
+
+In the editor, run **vlint: Connect Figma**: paste the file link, then paste your token once. The link fills in the file key (and the page, when the link has a node selected); the token goes straight to secret storage and never touches a file.
+
+Headless, the CLI does the same from a pasted link:
+
+```bash
+vlint init "https://www.figma.com/file/<KEY>/Dashboard?node-id=285-31"
+# writes design.manifest with FIGMA_FKEY and FIGMA_DEV_PAGE; set FIGMA_PAT in your env
+export FIGMA_PAT=your_personal_access_token
+vlint extract
+```
+
+`init` never writes the token to the manifest. A link with a frame selected sets the page for you; otherwise pass `--page <id|name>`.
+
+### The manifest, in full
+
+`vlint init` and **Connect Figma** both write `design.manifest` at the workspace root. You can also write it by hand:
 
 ```ini
 # Figma file key (from the URL: figma.com/file/<KEY>/...)
 FIGMA_FKEY = your_file_key
 
-# Name of the Figma page to target
+# The Figma page to target: a page name, or a node id (285:31) from a pasted link
 FIGMA_DEV_PAGE = Development
 
 # Optional: output directory for generated CSS files (default: src/styles/figma)

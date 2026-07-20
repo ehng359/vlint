@@ -17,6 +17,10 @@
   "contributes": {
     "commands": [
       {
+        "command": "vlint.connectFigma",
+        "title": "vlint: Connect Figma"
+      },
+      {
         "command": "vlint.setFigmaPat",
         "title": "vlint: Set Figma Token"
       }

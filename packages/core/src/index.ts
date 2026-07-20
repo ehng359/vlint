@@ -1,6 +1,7 @@
 import { generateLayoutCss, getFileMeta, hasFileBeenUpdated, queryFigmaStyles } from './extraction';
 import { getLogger, Logger, setLogger } from './logger';
 import { parseManifest } from './manifest';
+import { FigmaRef, looksLikeNodeId, parseFigmaUrl } from './figma-url';
 import {
     applyClassFixes, applyStyleFixes, ClassFix, extractDataFigmaNames,
     extractStyleProps, getDesignAnnotation, getDesignOverrides, StyleFix, StyleProp
@@ -166,6 +167,9 @@ export {
     getFrameSpec,
     getLogger,
     hasFileBeenUpdated,
+    FigmaRef,
+    looksLikeNodeId,
+    parseFigmaUrl,
     lintSource,
     listFrames,
     loadCssModules,

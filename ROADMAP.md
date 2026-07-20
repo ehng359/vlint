@@ -118,3 +118,13 @@ Done when `npm view @vlint/core` resolves and the extension is on the Marketplac
 
 - [x] Resolve `theme.x.y` member expressions to token identities. An inline theme member path is reduced to its semantic leaf (`theme.colors.primary` and `color/primary` both become `primary`, tolerating the Tailwind-vs-Figma category gap) and, when the spec binds a token for that property, compared against it. A wrong token is a `token-mismatch` error; a matching or unbound reference stays exempt. The identity is unfixable (we know the Figma token name, not the project's theme path for it), so it reports as manual drift rather than being auto-rewritten. Class references stay exempt to avoid false-positiving on palette shades.
 - [ ] Decide hosted-bot vs. the paste-in `github-script` templates for PR rendering. The templates are fine for launch; defer unless a consumer asks.
+
+### Track D: onboarding friction (landed July 2026)
+
+The biggest friction was setup: hand-editing `design.manifest` with a file key and page name, and typing the PAT into a file. Both are now paste-a-link flows.
+
+- [x] `parseFigmaUrl` in core: pure parser that pulls the file key and node id from any Figma file/design/proto link (or a bare key), normalising the URL dash form (`285-31`) to the API colon form (`285:31`). Fixture-tested, no credentials.
+- [x] Extraction resolves a page by node id, not just name: a pasted link's node id matches the page directly or any node inside it (within the fetched depth), so `FIGMA_DEV_PAGE` accepts an id.
+- [x] `vlint init <figma-url> [--page <id|name>]`: writes `design.manifest` from a pasted link, preserving existing keys and never persisting the token. The PAT comes from `FIGMA_PAT` (CI) or secret storage (editor).
+- [x] Extension **vlint: Connect Figma** command: paste the file link, paste the token once. Writes the manifest (no PAT) and stores the token in secret storage.
+- [ ] OAuth sign-in as an alternative to a PAT. Needs a registered Figma OAuth app (client id/secret) and a URI-handler callback, so it is gated on creating that app. The PAT-via-secret-storage flow is the shipped v1.

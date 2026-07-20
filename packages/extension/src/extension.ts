@@ -1,6 +1,6 @@
 import {
 	applyClassFixes, applyStyleFixes, ClassFix, extractDataFigmaNames, FigmaPage,
-	FrameSpec, getFileMeta, lintSource, loadCssModules, parseManifest,
+	FrameSpec, getFileMeta, lintSource, loadCssModules, parseFigmaUrl, parseManifest,
 	queryFigmaStyles, setLogger, StyleFix, Violation, violationMessage,
 	violationToClassFix, violationToStyleFix
 } from '@vlint/core';
@@ -162,6 +162,49 @@ export function activate(context: vscode.ExtensionContext) {
 				await context.secrets.store(PAT_SECRET_KEY, pat);
 				vscode.window.showInformationMessage('vlint: Figma token stored securely.');
 			}
+		})
+	);
+
+	// One guided flow instead of hand-editing design.manifest: paste the
+	// file link, paste the token once. The link fills FIGMA_FKEY (and the page
+	// when it carries a node id); the token goes to secret storage, never to a
+	// committed file.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('vlint.connectFigma', async () => {
+			const url = await vscode.window.showInputBox({
+				prompt: 'Paste a Figma file link (or file key)',
+				placeHolder: 'https://www.figma.com/file/…?node-id=…',
+				ignoreFocusOut: true,
+			});
+			if (!url) return;
+			const ref = parseFigmaUrl(url);
+			if (!ref) {
+				vscode.window.showErrorMessage('vlint: that is not a Figma file link or key.');
+				return;
+			}
+
+			const current = parseManifest(manifestPath);
+			const next: Record<string, string> = { ...current, FIGMA_FKEY: ref.fileKey };
+			if (ref.nodeId) next.FIGMA_DEV_PAGE = ref.nodeId;
+			const lines = ['# vlint design contract. FIGMA_PAT lives in secret storage, not here.', ''];
+			for (const [k, v] of Object.entries(next)) {
+				if (k === 'FIGMA_PAT') continue;
+				lines.push(`${k}=${v}`);
+			}
+			fs.writeFileSync(manifestPath, lines.join('\n') + '\n');
+			manifest = parseManifest(manifestPath);
+
+			const pat = await vscode.window.showInputBox({
+				prompt: 'Figma Personal Access Token (stored securely, never written to a file)',
+				password: true,
+				ignoreFocusOut: true,
+			});
+			if (pat) await context.secrets.store(PAT_SECRET_KEY, pat);
+
+			const pageNote = next.FIGMA_DEV_PAGE ? '' : ' Set a page in design.manifest, then save to extract.';
+			vscode.window.showInformationMessage(
+				`vlint: connected to Figma file ${ref.fileKey}.${pat ? '' : ' Add a token later with "vlint: Set Figma Token".'}${pageNote}`
+			);
 		})
 	);
 
