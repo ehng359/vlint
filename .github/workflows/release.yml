@@ -1,0 +1,63 @@
+name: Release
+
+# Publish @vlint/{core,cli,mcp} to npm when a v* tag is pushed. The tag's
+# version must match packages/core/package.json (scripts/bump-version.js keeps
+# every package in lockstep, so checking core is enough).
+#
+# Requires an NPM_TOKEN repo secret (npm automation token with publish rights).
+# The VS Code extension is released separately with vsce; it is not part of this.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm --provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - name: Tag must match core version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CORE="$(node -p "require('./packages/core/package.json').version")"
+          if [ "$TAG" != "$CORE" ]; then
+            echo "tag $GITHUB_REF_NAME does not match core version $CORE" >&2
+            exit 1
+          fi
+
+      # Same gates as CI: nothing publishes unless every suite and the extension
+      # bundle pass.
+      - run: npm test --workspace=packages/core
+      - run: npm test --workspace=packages/cli
+      - run: npm test --workspace=packages/mcp
+      - run: npx tsc -p packages/extension --noEmit
+      - run: npm run bundle --workspace=packages/extension
+
+      # Publish in dependency order. --provenance ties each package to this
+      # workflow run. Idempotent-ish: a version already on npm fails the step,
+      # which is the correct signal that the tag was already released.
+      - name: Publish core
+        run: npm publish --workspace=packages/core --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish cli
+        run: npm publish --workspace=packages/cli --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish mcp
+        run: npm publish --workspace=packages/mcp --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

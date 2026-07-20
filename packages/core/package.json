@@ -24,7 +24,7 @@
   "type": "commonjs",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ehng359/vlint",
+    "url": "git+https://github.com/ehng359/vlint.git",
     "directory": "packages/core"
   },
   "publishConfig": {
