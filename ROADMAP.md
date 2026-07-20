@@ -95,10 +95,15 @@ Everything in the ranked list above except the live matrix and publish has lande
 
 The responsive and token layers have zero live coverage: the current test file cannot exercise them. Until that changes, publishing risks bad first-impression bug reports on paths that have only ever run against fixtures.
 
+**Base pipeline: live-verified July 20 2026.** Ran the repo build against `~/Documents/test-vlint` (a real Figma file, real PAT). `extract` pulled 2 frames and generated CSS, and re-running was stable (identical frame set). `check` reported 12 real drift warnings against `app/page.tsx`, and `fix --dry-run` proposed all 12 inline corrections without writing. So extraction, CSS generation, drift detection, and the fix path all work end to end live.
+
+**Still unexercised live**, because the test file contains only two plain frames with no breakpoints, no bound variables, and no per-corner radii: the responsive cascade, the token/theme identity checks, and the per-corner-radius and gradient/rotation robustness paths. These need the Figma file extended.
+
 - [ ] Extend the test Figma file (~15 min): a `Dashboard@md` breakpoint frame; a color variable bound to a fill; a frame wrapped in a Section; a gradient fill and an image fill; a rotated node; per-corner radii.
-- [ ] Run `vlint extract` (needs the PAT), then `check` and `fix` against every new frame; read the output for each of the six cases.
+- [x] Run `vlint extract`, `check`, and `fix` live against the existing frames (base pipeline verified, above).
+- [ ] Re-run all three against the extended frames; read the output for each of the six new cases.
 - [ ] For anything that misbehaves, fix the engine and add a fixture test capturing the real API response shape so it never regresses.
-- [ ] Dogfood on one real consumer workspace, not a scratch directory. Record findings here.
+- [ ] Dogfood on one real consumer workspace, not a scratch directory (`~/Documents/lablueprint`, `~/Documents/UCLA_Courses` are candidates). Record findings here.
 
 Done when each of the six cases validates correctly or has a filed-and-fixed engine change with a fixture behind it.
 
