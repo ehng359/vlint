@@ -169,3 +169,13 @@ test("queryFigmaStyles throws a descriptive error for a missing page", async () 
         /No frames found on page "nonexistent-page"/
     );
 });
+
+test("queryFigmaStyles resolves a page by node id from a pasted link", async () => {
+    // The fixture page is id "0:1"; a link selecting the page carries node-id=0-1.
+    stubFetch([
+        ["?depth=", fixture("file-depth2-response.json")],
+        ["/nodes?ids=", fixture("nodes-response.json")],
+    ]);
+    const page = await queryFigmaStyles("0:1", "FKEY", "PAT");
+    assert.ok(page.nodes.Dashboard, "found the same frames when matching the page by id");
+});

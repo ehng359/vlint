@@ -84,9 +84,20 @@ async function getTargetNodeIds(targetPageName, fileKey, accessToken) {
   let sectionsTraversed = 0;
 
   if (fileData.document && fileData.document.children) {
-    const targetPage = fileData.document.children.find(
-      page => page.type === "CANVAS" && page.name === targetPageName
-    );
+    // A pasted Figma link yields a node id (285:31), not a page name, so match
+    // on either: id when the value looks like one, name otherwise. Figma's URL
+    // dash form (285-31) is folded to the API colon form before comparison. A
+    // link usually selects a frame, not its page, so an id can match the page
+    // directly or any node inside it (within the depth we fetched).
+    const wantsId = /^[A-Za-z]?\d+[:-]\d+/.test(targetPageName);
+    const normalisedTarget = wantsId ? targetPageName.replace("-", ":") : targetPageName;
+    const pages = fileData.document.children.filter(p => p.type === "CANVAS");
+    const containsId = (node) =>
+      node.id === normalisedTarget ||
+      (node.children || []).some(containsId);
+    const targetPage = wantsId
+      ? pages.find(p => p.id === normalisedTarget) || pages.find(containsId)
+      : pages.find(p => p.name === targetPageName);
 
     if (targetPage && targetPage.children) {
       const takeFrame = (child, pageName) => {
@@ -103,7 +114,7 @@ async function getTargetNodeIds(targetPageName, fileKey, accessToken) {
         }
       });
     } else {
-      getLogger().warn(`Page named "${targetPageName}" not found in file.`);
+      getLogger().warn(`No page ${wantsId ? `containing node ${targetPageName}` : `named "${targetPageName}"`} found in file.`);
     }
   }
 

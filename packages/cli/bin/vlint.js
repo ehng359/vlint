@@ -7,6 +7,7 @@ const core = require("@vlint/core");
 const USAGE = `vlint: validate React sources against a Figma design contract
 
 Usage:
+  vlint init <figma-url> [--page <id|name>]   Configure design.manifest from a pasted link
   vlint extract                           Fetch from Figma, write DESIGN_REF.json + CSS
   vlint check <file...> [options]         Lint files against DESIGN_REF.json
   vlint fix <file...> [options]           Rewrite drifted inline styles to match the spec
@@ -35,6 +36,7 @@ function parseCliArgs(argv) {
         args: argv,
         options: {
             frame: { type: "string" },
+            page: { type: "string" },
             json: { type: "boolean" },
             strict: { type: "boolean" },
             "no-remote": { type: "boolean" },
@@ -286,6 +288,40 @@ function cmdTokens(root) {
     console.log(theme.trimEnd());
 }
 
+// `vlint init <figma-url>`: derive the file key (and page, if the link carries
+// a node id) from a pasted Figma link and write design.manifest, so onboarding
+// needs no hand-typed keys. The PAT is never written to the manifest: it comes
+// from the FIGMA_PAT env var (CI) or the extension's secret storage.
+function cmdInit(root, positional, flags) {
+    const url = positional[0];
+    if (!url) fail("Usage: vlint init <figma-url> [--page <id|name>]");
+
+    const ref = core.parseFigmaUrl(url);
+    if (!ref) fail(`Not a Figma file link or key: "${url}"`);
+
+    const manifestPath = path.join(root, "design.manifest");
+    const existing = core.parseManifest(manifestPath);
+    const next = { ...existing, FIGMA_FKEY: ref.fileKey };
+
+    const page = flags.page || ref.nodeId;
+    if (page) next.FIGMA_DEV_PAGE = page;
+
+    const lines = ["# vlint design contract. FIGMA_PAT is intentionally absent:",
+        "# provide it via the FIGMA_PAT env var or the editor's secret storage.", ""];
+    for (const [k, v] of Object.entries(next)) {
+        if (k === "FIGMA_PAT") continue; // never persist the token to the manifest
+        lines.push(`${k}=${v}`);
+    }
+    fs.writeFileSync(manifestPath, lines.join("\n") + "\n");
+
+    console.error(`[vlint] Wrote design.manifest: FIGMA_FKEY=${ref.fileKey}` +
+        (next.FIGMA_DEV_PAGE ? `, FIGMA_DEV_PAGE=${next.FIGMA_DEV_PAGE}` : ""));
+    if (!next.FIGMA_DEV_PAGE) {
+        console.error("[vlint] No page in the link. Add one with --page <id|name> or paste a link with a frame selected.");
+    }
+    console.error("[vlint] Set FIGMA_PAT in your environment, then run `vlint extract`.");
+}
+
 async function main() {
     let flags, positional;
     try {
@@ -297,6 +333,7 @@ async function main() {
     const root = process.cwd();
 
     switch (command) {
+        case "init": cmdInit(root, positional, flags); break;
         case "extract": await cmdExtract(root); break;
         case "check": await cmdCheck(root, positional, flags); break;
         case "fix": cmdFix(root, positional, flags); break;
