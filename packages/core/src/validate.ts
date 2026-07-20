@@ -16,6 +16,7 @@ export type ViolationKind =
   | "mismatch"        // property exists in both, values differ
   | "missing"         // property in the Figma spec, absent from the code
   | "hardcoded-token" // value matches today but the spec binds a design token
+  | "token-mismatch"  // code references a design token, but the wrong one
   | "unknown-component"; // annotation has no counterpart in the frame
 
 export interface Violation {
@@ -47,6 +48,8 @@ function baseViolationMessage(v: Violation): string {
       return `${v.component}.${v.property} missing in code, Figma says ${JSON.stringify(v.expected)}`;
     case "hardcoded-token":
       return `${v.component}.${v.property} matches today but hardcodes token "${v.token}", will drift silently`;
+    case "token-mismatch":
+      return `${v.component}.${v.property} references ${JSON.stringify(v.actual)}, Figma binds token "${v.token}"`;
     case "unknown-component":
       return `"${v.component}" is referenced in code but has no counterpart in the Figma frame`;
   }
@@ -133,6 +136,29 @@ function isTokenReference(value: string | number | boolean): boolean {
 function tokenReferenceMatches(value: string, tokenName: string): boolean {
   const m = value.match(/^var\(--([\w-]+)/);
   return !!m && m[1] === tokenToCssVarName(tokenName);
+}
+
+// Leading scale/category words that a theme path and a Figma token name label
+// differently (theme.colors.x vs color/x) or that carry no identity of their
+// own. Stripping them lets both sides reduce to the token's semantic leaf.
+const TOKEN_CATEGORY_WORDS = new Set([
+  "theme", "tokens", "colors", "color", "spacing", "space", "gap",
+  "borderradius", "radius", "radii", "rounded", "fontsize", "fontsizes",
+  "fontweight", "fontfamily", "shadow", "shadows", "boxshadow",
+  "size", "sizes", "width", "height", "opacity", "zindex", "screens",
+]);
+
+// Reduce a design-token reference to a comparable identity by dropping the
+// leading category words and joining the rest. "theme.colors.primary" and
+// "color/primary" both become "primary"; "theme.colors.brand.dark" and
+// "color/brand/dark" both become "brand-dark". Returns null when nothing
+// but category words remains, so an unresolvable reference stays exempt.
+function referenceIdentity(raw: string): string | null {
+  const parts = raw.toLowerCase().split(/[./]+/).filter(Boolean);
+  let i = 0;
+  while (i < parts.length && TOKEN_CATEGORY_WORDS.has(parts[i])) i++;
+  const rest = parts.slice(i);
+  return rest.length ? rest.join("-") : null;
 }
 
 // A spec node as lintSource consumes it: CSS-valued props plus optional
@@ -316,12 +342,34 @@ export function lintSource(
           const actual = found.value ?? null;
           const propLoc = found.loc ?? elementLoc;
 
-          // References (theme.x.y, bg-primary, w-full) can't be resolved
-          // statically: present, exempt from value comparison. Flagging a
-          // class that names a different token would false-positive on
-          // palette shades (color-slate-900), so references are never
-          // mismatches.
-          if (found.reference) continue;
+          // References (theme.x.y, bg-primary, w-full) can't be value-compared
+          // statically. One case is resolvable though: an inline theme member
+          // path (theme.colors.primary) carries a token identity, so when the
+          // spec binds a token we can catch a reference to the wrong one. Class
+          // references stay exempt: flagging them would false-positive on
+          // palette shades (bg-slate-900) that legitimately deviate.
+          if (found.reference) {
+            const ref = found.value;
+            if (token && found.origin === "style" && typeof ref === "string" && ref.includes(".")) {
+              const refId = referenceIdentity(ref);
+              const tokenId = referenceIdentity(token);
+              if (refId && tokenId && refId !== tokenId) {
+                violations.push({
+                  component: componentName,
+                  property: prop,
+                  expected: token,
+                  actual: ref,
+                  kind: "token-mismatch",
+                  severity: "error",
+                  token,
+                  loc: propLoc,
+                  breakpoint,
+                  source: "style",
+                });
+              }
+            }
+            continue;
+          }
 
           if (actual !== null && isTokenReference(actual)) {
             // var(--x) can't be resolved statically; only flag it when the

@@ -40,7 +40,7 @@ const TOOLS = [
         description:
             "Statically validate a React source file's annotated inline styles against " +
             "the design contract. Returns violations (mismatch, missing, hardcoded-token, " +
-            "unknown-component) with source locations. Same shape as `vlint check --json`.",
+            "token-mismatch, unknown-component) with source locations. Same shape as `vlint check --json`.",
         inputSchema: {
             type: "object",
             properties: {

@@ -190,10 +190,36 @@ test("data-figma attribute matching a spec node produces no violation", () => {
     assert.deepStrictEqual(violations, []);
 });
 
-test("theme member expressions count as present and skip value comparison", () => {
+test("theme member expression naming the bound token is clean", () => {
+    // Sidebar binds backgroundColor to color/primary; theme.colors.primary
+    // resolves to the same identity across the color/colors category gap.
     const violations = lint(`
         // @design-component Sidebar
         const S = () => <div data-figma="Sidebar" style={{ width: 220, backgroundColor: theme.colors.primary }} />;
+    `);
+    assert.deepStrictEqual(violations, []);
+});
+
+test("theme member expression naming the wrong token is a token-mismatch error", () => {
+    const violations = lint(`
+        // @design-component Sidebar
+        const S = () => <div data-figma="Sidebar" style={{ width: 220, backgroundColor: theme.colors.secondary }} />;
+    `);
+    assert.strictEqual(violations.length, 1);
+    const v = violations[0];
+    assert.strictEqual(v.kind, "token-mismatch");
+    assert.strictEqual(v.severity, "error");
+    assert.strictEqual(v.property, "backgroundColor");
+    assert.strictEqual(v.token, "color/primary");
+    assert.strictEqual(v.actual, "theme.colors.secondary");
+});
+
+test("theme reference stays exempt when the spec binds no token", () => {
+    // StatBlock has no token binding on borderRadius, so a theme reference
+    // has nothing to compare against and must not be flagged.
+    const violations = lint(`
+        // @design-component StatBlock
+        const S = () => <div data-figma="StatBlock" style={{ borderRadius: theme.radius.card }} />;
     `);
     assert.deepStrictEqual(violations, []);
 });

@@ -116,5 +116,5 @@ Done when `npm view @vlint/core` resolves and the extension is on the Marketplac
 
 ### Track C: smaller open threads (after A and B, optional)
 
-- [ ] Resolve `theme.x.y` member expressions to concrete token identities so they get real value comparison instead of present-but-exempt.
+- [x] Resolve `theme.x.y` member expressions to token identities. An inline theme member path is reduced to its semantic leaf (`theme.colors.primary` and `color/primary` both become `primary`, tolerating the Tailwind-vs-Figma category gap) and, when the spec binds a token for that property, compared against it. A wrong token is a `token-mismatch` error; a matching or unbound reference stays exempt. The identity is unfixable (we know the Figma token name, not the project's theme path for it), so it reports as manual drift rather than being auto-rewritten. Class references stay exempt to avoid false-positiving on palette shades.
 - [ ] Decide hosted-bot vs. the paste-in `github-script` templates for PR rendering. The templates are fine for launch; defer unless a consumer asks.
