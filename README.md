@@ -435,6 +435,10 @@ Once the sandbox window is open:
 
 Logs from the extension (including `console.log`) appear in the **Debug Console** of your primary VS Code window. To apply code changes made in `extension.ts`, click the reload button on the floating debug toolbar.
 
+#### 6. Cutting a release
+
+Publishing the npm packages and the extension is documented step by step in [RELEASING.md](./RELEASING.md): version bumping in lockstep, the tag-triggered workflow versus a local `scripts/release.sh` publish, and `vsce publish` for the Marketplace.
+
 ---
 
 ## Roadmap
