@@ -103,7 +103,7 @@ The responsive and token layers have zero live coverage: the current test file c
 - [x] Run `vlint extract`, `check`, and `fix` live against the existing frames (base pipeline verified, above).
 - [ ] Re-run all three against the extended frames; read the output for each of the six new cases.
 - [ ] For anything that misbehaves, fix the engine and add a fixture test capturing the real API response shape so it never regresses.
-- [ ] Dogfood on one real consumer workspace, not a scratch directory (`~/Documents/lablueprint`, `~/Documents/UCLA_Courses` are candidates). Record findings here.
+- [x] Dogfood on a real consumer workspace. `~/Documents/UCLA_Courses/test` (Vite app, `Dashboard.tsx` + `ProductCard.tsx` annotated) checked live July 20 2026: 13 mismatch errors and 125 missing-property warnings across two frames, exercising the mismatch path richly (box model, fonts, `inset` box-shadow, `letterSpacing`, `textTransform`). `fix --dry-run` resolved all 13 mismatches to their Figma values. The 13 errors are consistent width/height drift (+48-64px) at differing ratios, so genuine per-component drift in the consumer code, not a uniform-scale extraction bug. Still exercised nowhere live: tokens and responsive (this workspace targets the same token-free, breakpoint-free Figma file).
 
 Done when each of the six cases validates correctly or has a filed-and-fixed engine change with a fixture behind it.
 
