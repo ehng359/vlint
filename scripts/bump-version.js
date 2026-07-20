@@ -84,7 +84,9 @@ function main() {
   for (const m of manifests) {
     fs.writeFileSync(m.file, JSON.stringify(m.json, null, 2) + "\n");
   }
-  console.log(`\n✓ all packages at ${target}. Review, commit, then tag v${target}.`);
+  console.log(`\n✓ all packages at ${target}.`);
+  console.log("Next: run 'npm install' to refresh package-lock.json (npm ci in CI");
+  console.log(`      needs it in sync), then commit both and tag v${target}.`);
 }
 
 main();
