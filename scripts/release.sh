@@ -45,6 +45,11 @@ for p in cli mcp; do
   [[ "$dep" == "^$VERSION" ]] || { echo "error: packages/$p depends on @vlint/core $dep, expected ^$VERSION." >&2; exit 1; }
 done
 
+# The lockfile records each workspace's version. If a bump did not refresh it,
+# `npm ci` in CI and the release workflow fails. Catch that here, not there.
+LOCK_VERSION="$(node -p "require('./package-lock.json').packages['packages/core'].version")"
+[[ "$LOCK_VERSION" == "$VERSION" ]] || { echo "error: package-lock.json has core at $LOCK_VERSION, expected $VERSION. Run 'npm install' and commit the lockfile." >&2; exit 1; }
+
 # 2. Same gates as CI. Never publish something that would fail CI.
 say "Running test suites"
 npm test --workspace=packages/core
@@ -60,7 +65,9 @@ FLAGS=()
 [[ "$LIVE" == "1" ]] || FLAGS+=(--dry-run)
 for p in "${PACKAGES[@]}"; do
   say "npm publish @vlint/$p ${FLAGS[*]:-}"
-  npm publish --workspace="packages/$p" "${FLAGS[@]:-}"
+  # ${FLAGS[@]+"${FLAGS[@]}"} expands to nothing when the array is empty (live
+  # mode), instead of injecting a stray empty-string argument.
+  npm publish --workspace="packages/$p" ${FLAGS[@]+"${FLAGS[@]}"}
 done
 
 if [[ "$LIVE" == "1" ]]; then

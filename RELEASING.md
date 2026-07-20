@@ -32,12 +32,18 @@ node scripts/bump-version.js minor     # or major / minor / patch, computed off 
 ```
 
 It edits `packages/{core,cli,mcp,extension}/package.json`, prints what changed, and
-exits non-zero if there was nothing to do. Review the diff, then commit:
+exits non-zero if there was nothing to do. Then refresh the lockfile and commit both:
+the root `package-lock.json` records each workspace's version, and `npm ci` (used by
+CI and the release workflow) fails if it drifts from the manifests.
 
 ```bash
-git add packages/*/package.json
+npm install                              # updates package-lock.json to the new version
+git add packages/*/package.json package-lock.json
 git commit -m "Release 0.2.0"
 ```
+
+`scripts/release.sh` guards this: it refuses to publish if the lockfile's core version
+does not match the manifests.
 
 ## Publishing to npm
 
