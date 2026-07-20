@@ -28,6 +28,46 @@ Unannotated children are treated as black boxes and are not validated unless the
 
 ---
 
+## Getting started
+
+Three steps from a fresh install to live linting.
+
+**1. Connect your Figma file.** Open the Command Palette (`Cmd/Ctrl+Shift+P`) and run **vlint: Connect Figma**. Paste a link to your Figma file, then paste a [Figma personal access token](https://www.figma.com/developers/api#access-tokens) once. The link fills in the file key (and the target page, if a frame is selected in the link); the token is stored in VS Code secret storage and never written to a file.
+
+> You can paste any Figma file link. If it has a frame selected (`?node-id=…`), that frame's page becomes the target automatically; otherwise set `FIGMA_DEV_PAGE` in `design.manifest`. To change or clear the token later, use **vlint: Set Figma Token**.
+
+**2. Annotate a component.** Declare which frame the file maps to, and which node each element implements:
+
+```tsx
+// @design-frame Dashboard
+
+// @design-component Sidebar
+const Sidebar = () => (
+  <div data-figma="Sidebar" style={{ width: "220px", backgroundColor: "#1A1A38" }}>
+    ...
+  </div>
+);
+```
+
+**3. Save.** On every save vlint extracts the frame (only when Figma has changed), regenerates the CSS, and lints the file. Drift appears as squiggles at the exact line, each with an **Apply Figma value** quick fix (`Cmd/Ctrl+.`). Findings also stream to the **vlint** output channel.
+
+By default nothing is rewritten silently: you apply fixes one at a time from the quick-fix menu. To rewrite mismatches and missing properties automatically on save, set `"vlint.autoFix": true` in your settings.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| **vlint: Connect Figma** | Paste a file link and a token to configure the workspace. The one-step setup. |
+| **vlint: Set Figma Token** | Store or replace the Figma token in secret storage without touching the file link. |
+
+### Settings
+
+| Setting | Default | Effect |
+|---|---|---|
+| `vlint.autoFix` | `false` | When on, mismatches and missing properties are rewritten to match Figma on save. When off, they surface as diagnostics with quick fixes only. |
+
+---
+
 ## Architecture
 
 The system is composed of five sequential stages.
@@ -110,12 +150,13 @@ On every `.jsx` / `.tsx` save, the extension:
 
 1. Looks up the `@design-frame` declaration in the file to identify which root Figma frame to compare against.
 2. Runs `lintSource` from `@vlint/core`: one AST traversal that cross-references every annotated component's static style props against the corresponding node in `DESIGN_REF.json`.
-3. Detects four categories of violation:
+3. Detects five categories of violation:
    - **Value mismatch** (error): the property exists in both code and Figma but the values differ.
    - **Missing property** (warning): the property exists in the Figma specification but is absent from the code. Usually harmless, since the generated CSS supplies it.
    - **Hardcoded token** (warning): the value matches today, but the Figma property is bound to a design variable. The code will silently go stale when the token changes upstream.
+   - **Token mismatch** (error): the code references a design token (`theme.colors.secondary`) but the Figma property binds a different one.
    - **Unknown component** (warning): the annotation has no counterpart in the frame.
-4. Applies a normalisation layer before comparison to handle equivalent representations: `16px === 16`, `bold === 700`, `#FFF === #ffffff === rgba(255,255,255,1)`. A `var(--color-primary)` reference is checked against the bound token's name rather than its current value, and `theme.x.y` member expressions are treated as design-system references, present but exempt from value comparison.
+4. Applies a normalisation layer before comparison to handle equivalent representations: `16px === 16`, `bold === 700`, `#FFF === #ffffff === rgba(255,255,255,1)`. A `var(--color-primary)` reference is checked against the bound token's name rather than its current value. A `theme.x.y` member expression is resolved to its token identity and checked against the property's bound token when one exists (naming the wrong token is a token mismatch); an unbound reference stays exempt from value comparison.
 5. Publishes every violation as an editor diagnostic (squiggles at the exact source location) with an "Apply Figma value" quick fix. With `vlint.autoFix` enabled (off by default), mismatches and missing properties are corrected in a single Babel AST transformation pass and written back via `WorkspaceEdit`.
 
 Findings also stream to the **vlint** output channel in the VS Code panel.
@@ -124,23 +165,23 @@ Findings also stream to the **vlint** output channel in the VS Code panel.
 
 ## Workspace Configuration
 
-vlint expects a `design.manifest` file at the workspace root with the following keys:
+The **vlint: Connect Figma** command (see [Getting started](#getting-started)) writes the workspace's `design.manifest` for you from a pasted link and stores the token securely. You rarely need to edit the manifest by hand, but here is what it holds:
 
 ```ini
-# Figma file key (from the URL: figma.com/file/<KEY>/...)
+# Figma file key. Connect Figma fills this from the pasted link.
 FIGMA_FKEY = your_file_key
 
-# Name of the Figma page to target
+# The Figma page to target: a page name, or a node id (285:31) from a pasted link.
 FIGMA_DEV_PAGE = Development
 
 # Optional: output directory for generated CSS files (default: src/styles/figma)
 FIGMA_STYLES_DIR = src/styles/figma
 
-# Optional, CLI only: the extension stores the token in VS Code secret storage instead
+# Optional, CLI only: the editor keeps the token in secret storage instead.
 FIGMA_PAT = your_personal_access_token
 ```
 
-In the editor, set the token with the **vlint: Set Figma Token** command; it lives in VS Code secret storage, not on disk. A `FIGMA_PAT` found in the manifest is migrated into secret storage on activation so it can be deleted from the file. Keep `design.manifest` gitignored if the token stays in it for CLI use.
+The token lives in VS Code secret storage, not on disk. A `FIGMA_PAT` found in the manifest is migrated into secret storage on activation, so it can then be deleted from the file. If you keep it in the manifest for headless CLI use, keep `design.manifest` gitignored.
 
 The manifest is re-parsed automatically whenever it is saved, so targets can be updated without reloading the extension.
 

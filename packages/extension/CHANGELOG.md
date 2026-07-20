@@ -6,4 +6,6 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+- **vlint: Connect Figma** command: paste a file link and a token once to configure the workspace, no manual `design.manifest` editing. The token goes to secret storage.
+- `theme.x.y` references are validated against the property's bound Figma token; naming the wrong token is a token-mismatch error.
 - Initial release

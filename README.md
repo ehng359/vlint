@@ -110,10 +110,11 @@ On every `.jsx` / `.tsx` save, the extension:
 
 1. Looks up the `@design-frame` declaration in the file to identify which root Figma frame to compare against.
 2. Runs `lintSource` from `@vlint/core`: one AST traversal that cross-references every annotated component's static style props against the corresponding node in `DESIGN_REF.json`.
-3. Detects four categories of violation:
+3. Detects five categories of violation:
    - **Value mismatch** (error): the property exists in both code and Figma but the values differ.
    - **Missing property** (warning): the property exists in the Figma specification but is absent from the code. Usually harmless, since the generated CSS supplies it.
    - **Hardcoded token** (warning): the value matches today, but the Figma property is bound to a design variable. The code will silently go stale when the token changes upstream.
+   - **Token mismatch** (error): the code references a design token (`theme.colors.secondary`) but the Figma property binds a different one.
    - **Unknown component** (warning): the annotation has no counterpart in the frame.
 4. Applies a normalisation layer before comparison to handle equivalent representations: `16px === 16`, `bold === 700`, `#FFF === #ffffff === rgba(255,255,255,1)`. A `var(--color-primary)` reference is checked against the bound token's name rather than its current value. A `theme.x.y` member expression is resolved to its token identity and, when the spec binds a token for that property, checked against it: naming the wrong token (`theme.colors.secondary` where the spec binds `color/primary`) is a `token-mismatch` error, while a matching or unbound reference stays exempt from value comparison. The identity match tolerates the category-naming gap between a Tailwind theme path and a Figma token name (`theme.colors.primary` resolves the same as `color/primary`).
 5. Publishes every violation as an editor diagnostic (squiggles at the exact source location) with an "Apply Figma value" quick fix. With `vlint.autoFix` enabled (off by default), mismatches and missing properties are corrected in a single Babel AST transformation pass and written back via `WorkspaceEdit`.
