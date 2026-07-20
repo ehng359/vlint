@@ -35,7 +35,7 @@
   "publisher": "EdwardNg",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ehng359/vlint"
+    "url": "git+https://github.com/ehng359/vlint.git"
   },
   "scripts": {
     "vscode:prepublish": "echo 'Use build.sh to package'",
