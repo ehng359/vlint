@@ -86,3 +86,35 @@ Done when: the JSON output distinguishes the two failure directions and a consum
 4. **Publish.** `npm publish` in core, cli, mcp (core first), `vsce publish` for the extension. Optionally a `release.yml` that publishes on tag once an `NPM_TOKEN` secret exists.
 
 5. **CI integration layer.** Done as of July 2026: the repo doubles as a composite GitHub Action (`uses: ehng359/vlint@main`, root `action.yml`) that installs from the checkout itself, so it works before the npm packages exist. The README documents the PR comment step and the design-moved-ahead issue step as `github-script` templates consumers paste in. A hosted bot with richer rendering remains future work.
+
+## Ship plan (July 2026)
+
+Everything in the ranked list above except the live matrix and publish has landed (robustness sprint, cheap wins, and CI integration all shipped July 17). The remaining work splits into two tracks with a deliberate ordering: prove the untested paths live before shipping the engine.
+
+### Track A: live validation matrix (do first, needs Figma + a PAT)
+
+The responsive and token layers have zero live coverage: the current test file cannot exercise them. Until that changes, publishing risks bad first-impression bug reports on paths that have only ever run against fixtures.
+
+- [ ] Extend the test Figma file (~15 min): a `Dashboard@md` breakpoint frame; a color variable bound to a fill; a frame wrapped in a Section; a gradient fill and an image fill; a rotated node; per-corner radii.
+- [ ] Run `vlint extract` (needs the PAT), then `check` and `fix` against every new frame; read the output for each of the six cases.
+- [ ] For anything that misbehaves, fix the engine and add a fixture test capturing the real API response shape so it never regresses.
+- [ ] Dogfood on one real consumer workspace, not a scratch directory. Record findings here.
+
+Done when each of the six cases validates correctly or has a filed-and-fixed engine change with a fixture behind it.
+
+### Track B: release automation (landed July 20; runs when Track A is green)
+
+Publish order matters: `@vlint/cli` and `@vlint/mcp` both depend on `@vlint/core`, so core goes first, and their internal dep ranges must move with it.
+
+- [x] `scripts/bump-version.js` moves core/cli/mcp/extension to one version in lockstep and rewrites the internal `@vlint/core` ranges, so cli never ships a dep on a stale core.
+- [x] `scripts/release.sh` gates on a clean tagged tree and version consistency, runs all three suites plus the extension bundle (the CI gates), then publishes core → cli → mcp. Dry-run by default; `--live` to publish for real.
+- [x] `.github/workflows/release.yml` runs on `v*` tags: verifies the tag matches core's version, reruns the CI gates, and publishes each package with `--provenance`, gated on an `NPM_TOKEN` secret.
+- [ ] **You:** add the `NPM_TOKEN` repo secret (npm automation token). Then, once Track A is green, `node scripts/bump-version.js <version>`, commit, `git tag vX.Y.Z && git push --tags` (workflow publishes), or run `scripts/release.sh --live` locally.
+- [ ] **You:** `./build.sh && (cd packages/extension && npx vsce publish)` for the Marketplace (separate vsce token, deliberately not in CI).
+
+Done when `npm view @vlint/core` resolves and the extension is on the Marketplace.
+
+### Track C: smaller open threads (after A and B, optional)
+
+- [ ] Resolve `theme.x.y` member expressions to concrete token identities so they get real value comparison instead of present-but-exempt.
+- [ ] Decide hosted-bot vs. the paste-in `github-script` templates for PR rendering. The templates are fine for launch; defer unless a consumer asks.
