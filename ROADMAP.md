@@ -114,8 +114,8 @@ Publish order matters: `@vlint/cli` and `@vlint/mcp` both depend on `@vlint/core
 - [x] `scripts/bump-version.js` moves core/cli/mcp/extension to one version in lockstep and rewrites the internal `@vlint/core` ranges, so cli never ships a dep on a stale core.
 - [x] `scripts/release.sh` gates on a clean tagged tree and version consistency, runs all three suites plus the extension bundle (the CI gates), then publishes core → cli → mcp. Dry-run by default; `--live` to publish for real.
 - [x] `.github/workflows/release.yml` runs on `v*` tags: verifies the tag matches core's version, reruns the CI gates, and publishes each package with `--provenance`, gated on an `NPM_TOKEN` secret.
-- [ ] **You:** add the `NPM_TOKEN` repo secret (npm automation token). Then, once Track A is green, `node scripts/bump-version.js <version>`, commit, `git tag vX.Y.Z && git push --tags` (workflow publishes), or run `scripts/release.sh --live` locally.
-- [ ] **You:** `./build.sh && (cd packages/extension && npx vsce publish)` for the Marketplace (separate vsce token, deliberately not in CI).
+- [x] **Published July 21 2026.** `@vlint/core`, `@vlint/cli`, and `@vlint/mcp` are live on npm at 0.1.0 (`latest` tag), published by the `release.yml` workflow on the `v0.1.0` tag. The `NPM_TOKEN` secret must be a **Classic Automation** token: the account runs 2FA at `auth-and-writes`, and granular tokens (which do not bypass 2FA) are rejected with a 403. For future versions: `node scripts/bump-version.js <v>`, `npm install`, commit, `git tag vX.Y.Z && git push --tags`.
+- [ ] **You:** `./build.sh && (cd packages/extension && npx vsce publish)` for the Marketplace (separate vsce token, deliberately not in CI). Bump the extension CHANGELOG's "Unreleased" heading to the version at that point.
 
 Done when `npm view @vlint/core` resolves and the extension is on the Marketplace.
 
