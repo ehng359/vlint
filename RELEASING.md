@@ -78,6 +78,21 @@ scripts/release.sh --live     # the real thing, after npm login
 
 Always do the dry run first and read the tarball contents it prints.
 
+**2FA.** npm requires two-factor auth to publish. A plain `npm login` session is not
+enough; the publish step returns `403 ... Two-factor authentication ... is required`.
+Pass a fresh code from your authenticator, and skip re-running the suites so the code's
+~30-second window is not spent on tests:
+
+```bash
+scripts/release.sh --live --otp 123456 --skip-gates   # right after a green dry run
+```
+
+The same one-time code covers all three publishes since they run back to back. If it
+expires between packages, re-run with a new code: npm publishes are per-version, so
+already-published packages are simply skipped as "cannot publish over existing version"
+and you continue with the rest. To avoid OTP entirely, use the tag workflow (Path A)
+with a granular/automation token that has 2FA bypass enabled.
+
 ## Publishing the extension
 
 The extension is deliberately not part of the npm flow: the Marketplace uses `vsce`
